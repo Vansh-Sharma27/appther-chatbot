@@ -40,11 +40,24 @@ embed = [
     "tantivy>=0.22",
     "pandas>=2.0",
 ]
+# pip install -e ".[api]"
+api = [
+    "voyageai>=0.4",
+    "lancedb>=0.33",
+    "pyarrow>=14.0",
+    "tantivy>=0.22",
+    "httpx[http2]>=0.27",
+    "google-genai>=2.8.0",
+    "langdetect>=1.0.9",
+    "fastapi>=0.110",
+    "pydantic>=2.0",
+]
 dev = [
     "ruff==0.5.0",
     "pytest>=8.0",
     "pytest-httpx>=0.30",
     "pytest-mock>=3.14",
+    "pytest-asyncio>=0.23",
 ]
 
 [tool.ruff]
