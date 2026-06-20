@@ -66,34 +66,40 @@ resource "aws_iam_role_policy" "lambda_app" {
 
 # ── Crawler task role (Fargate / GitHub Actions OIDC) ─────────────────────────
 
-resource "aws_iam_role" "crawler" {
-  name = "${var.project}-crawler"
+data "aws_iam_policy_document" "crawler_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        # Fargate task principal
-        Effect    = "Allow"
-        Principal = { Service = "ecs-tasks.amazonaws.com" }
-        Action    = "sts:AssumeRole"
-      },
-      # GitHub Actions OIDC — uncomment after adding the OIDC provider to your account:
-      # {
-      #   Effect = "Allow"
-      #   Principal = {
-      #     Federated = "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
-      #   }
-      #   Action = "sts:AssumeRoleWithWebIdentity"
-      #   Condition = {
-      #     StringEquals = {
-      #       "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-      #       "token.actions.githubusercontent.com:sub" = "repo:YOUR_ORG/appther-chatbot:ref:refs/heads/main"
-      #     }
-      #   }
-      # }
-    ]
-  })
+  dynamic "statement" {
+    for_each = var.github_oidc_provider_arn != "" ? [1] : []
+    content {
+      actions = ["sts:AssumeRoleWithWebIdentity"]
+      principals {
+        type        = "Federated"
+        identifiers = [var.github_oidc_provider_arn]
+      }
+      condition {
+        test     = "StringEquals"
+        variable = "token.actions.githubusercontent.com:aud"
+        values   = ["sts.amazonaws.com"]
+      }
+      condition {
+        test     = "StringEquals"
+        variable = "token.actions.githubusercontent.com:sub"
+        values   = ["repo:${var.github_repo}:ref:refs/heads/main"]
+      }
+    }
+  }
+}
+
+resource "aws_iam_role" "crawler" {
+  name               = "${var.project}-crawler"
+  assume_role_policy = data.aws_iam_policy_document.crawler_assume_role.json
 }
 
 resource "aws_iam_role_policy" "crawler_app" {

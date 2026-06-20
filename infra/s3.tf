@@ -10,6 +10,28 @@ resource "aws_s3_bucket_versioning" "index" {
   }
 }
 
+resource "aws_s3_bucket_lifecycle_configuration" "index" {
+  bucket = aws_s3_bucket.index.id
+
+  rule {
+    id     = "expire-noncurrent-versions"
+    status = "Enabled"
+
+    noncurrent_version_expiration {
+      noncurrent_days = 60
+    }
+  }
+
+  rule {
+    id     = "abort-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "index" {
   bucket                  = aws_s3_bucket.index.id
   block_public_acls       = true

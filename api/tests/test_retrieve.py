@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import math
 
-from api.rag.retrieve import hybrid_retrieve, mmr_select, rrf_fuse
+import pytest
+
+from api.rag.retrieve import apply_page_type_boost, hybrid_retrieve, mmr_select, rrf_fuse
 
 from .conftest import DIMS, make_chunk, make_lance_row, make_mock_table
 
@@ -207,6 +209,17 @@ def test_hybrid_retrieve_respects_top_k():
     assert len(result) <= 10  # 5 vector + 5 fts (may overlap) → deduped ≤ 10
 
 
+def test_hybrid_retrieve_fused_cap_at_top_k():
+    """The fused+boosted result set is sliced to top_k, not only the individual searches."""
+
+    rows = [make_lance_row(f"c{i}", vector=[i * 0.01] * DIMS) for i in range(20)]
+    table = make_mock_table(vector_rows=rows, fts_rows=rows)
+    result = hybrid_retrieve([0.1] * DIMS, "query", table, top_k=6)
+    # With 20 vector + 20 fts rows and no cap, RRF could return up to 20 unique.
+    # With cap, we get exactly top_k after boost.
+    assert len(result) <= 6
+
+
 def test_hybrid_retrieve_empty_index():
     table = make_mock_table(vector_rows=[], fts_rows=[])
     result = hybrid_retrieve([0.1] * DIMS, "test", table, top_k=20)
@@ -231,3 +244,41 @@ def test_hybrid_retrieve_fts_failure_graceful(mocker):
     result = hybrid_retrieve([0.1] * DIMS, "test", table, top_k=5)
     assert len(result) >= 1
     assert result[0].chunk_id == "v1"
+
+
+# ── apply_page_type_boost ──────────────────────────────────────────────────────
+
+
+def test_page_type_boost_faq_beats_legal():
+    """A legal chunk with an equal initial score should rank below a FAQ chunk after boost."""
+    from api.rag.retrieve import _PAGE_TYPE_BOOST
+
+    legal = make_chunk("legal", page_type="legal", score=0.8, vector=[0.1] * DIMS)
+    faq = make_chunk("faq", page_type="faq", score=0.8, vector=[0.2] * DIMS)
+    result = apply_page_type_boost([legal, faq])
+    assert result[0].chunk_id == "faq"
+    assert result[1].chunk_id == "legal"
+    # Verify the multiplier was applied
+    assert result[0].score == pytest.approx(0.8 * _PAGE_TYPE_BOOST["faq"])
+    assert result[1].score == pytest.approx(0.8 * _PAGE_TYPE_BOOST["legal"])
+
+
+def test_page_type_boost_case_study_beats_generic():
+    """A case-study chunk with a low score should outrank a generic page."""
+    generic = make_chunk("generic", page_type="service", score=1.0, vector=[0.1] * DIMS)
+    cs = make_chunk("cs", page_type="case-study", score=0.9, vector=[0.2] * DIMS)
+    result = apply_page_type_boost([generic, cs])
+    assert result[0].chunk_id == "cs"
+    assert result[1].chunk_id == "generic"
+
+
+def test_page_type_boost_preserves_vector():
+    """apply_page_type_boost must carry through the vector field for MMR."""
+    vec = [0.5] * DIMS
+    chunk = make_chunk("c1", page_type="faq", vector=vec)
+    result = apply_page_type_boost([chunk])
+    assert result[0].vector == vec
+
+
+def test_page_type_boost_empty():
+    assert apply_page_type_boost([]) == []

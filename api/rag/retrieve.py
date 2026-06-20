@@ -74,7 +74,39 @@ def _row_to_chunk(row: dict, score: float) -> RetrievedChunk:
     )
 
 
-# ── MMR diversification ───────────────────────────────────────────────────────
+# ── Page-type metadata boost ──────────────────────────────────────────────
+
+# Score multiplier applied by page_type after RRF fusion.
+# High-value support pages (FAQ, case-study) get a boost; legal boilerplate
+# is down-ranked so it rarely competes with substantive content.
+_PAGE_TYPE_BOOST: dict[str, float] = {
+    "faq": 1.2,
+    "case-study": 1.2,
+    "legal": 0.3,
+}
+
+
+def apply_page_type_boost(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    """Adjust RRF scores by page_type so high-value content ranks higher.
+
+    Returns a new list sorted by the boosted score (descending).
+    """
+    boosted: list[RetrievedChunk] = []
+    for c in chunks:
+        multiplier = _PAGE_TYPE_BOOST.get(c.page_type, 1.0)
+        boosted.append(
+            RetrievedChunk(
+                chunk_id=c.chunk_id,
+                url=c.url,
+                title=c.title,
+                page_type=c.page_type,
+                text=c.text,
+                score=c.score * multiplier,
+                is_faq=c.is_faq,
+                vector=c.vector,
+            )
+        )
+    return sorted(boosted, key=lambda c: c.score, reverse=True)
 
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
@@ -159,9 +191,7 @@ def hybrid_retrieve(
     results are returned alone (graceful degradation).
     """
     # Vector search
-    vector_rows: list[dict] = (
-        table.search(query_vector, query_type="vector").limit(top_k).to_list()
-    )
+    vector_rows: list[dict] = table.search(query_vector, query_type="vector").limit(top_k).to_list()
 
     # FTS search — non-fatal if the index isn't ready yet
     fts_rows: list[dict] = []
@@ -170,4 +200,6 @@ def hybrid_retrieve(
     except Exception as exc:  # noqa: BLE001
         logger.warning("FTS search failed (falling back to vector-only): %s", exc)
 
-    return rrf_fuse(vector_rows, fts_rows)
+    fused = rrf_fuse(vector_rows, fts_rows)
+    boosted = apply_page_type_boost(fused)
+    return boosted[:top_k]

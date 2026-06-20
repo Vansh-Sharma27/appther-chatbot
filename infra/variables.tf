@@ -25,3 +25,15 @@ variable "secret_recovery_window_days" {
   type        = number
   default     = 7
 }
+
+variable "github_repo" {
+  description = "GitHub repository in 'org/repo' format for OIDC role assumption"
+  type        = string
+  default     = "Vansh-Sharma27/appther-chatbot"
+}
+
+variable "github_oidc_provider_arn" {
+  description = "ARN of the GitHub OIDC identity provider in AWS IAM. Set after creating the provider."
+  type        = string
+  default     = ""
+}

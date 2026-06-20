@@ -179,6 +179,9 @@ wheels = [
 name = "appther-chatbot"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "langdetect" },
+]
 
 [package.optional-dependencies]
 api = [
@@ -239,6 +242,7 @@ requires-dist = [
     { name = "httpx", extras = ["http2"], marker = "extra == 'embed'", specifier = ">=0.27" },
     { name = "lancedb", marker = "extra == 'api'", specifier = ">=0.33" },
     { name = "lancedb", marker = "extra == 'embed'", specifier = ">=0.33" },
+    { name = "langdetect", specifier = ">=1.0.9" },
     { name = "langdetect", marker = "extra == 'api'", specifier = ">=1.0.9" },
     { name = "lxml", marker = "extra == 'crawler'", specifier = ">=5.2" },
     { name = "lxml", marker = "extra == 'crawler-js'", specifier = ">=5.2" },

@@ -75,14 +75,32 @@ def should_escalate(question: str) -> bool:
 
     Escalation triggers:
     - More than one question mark (multi-part question)
-    - Comparative keywords ("compare", "vs", "versus", …)
+    - Comparative whole-word keywords ("compare", "vs", "versus", …)
     - Detail/depth keywords ("explain", "walk me through", …)
+
+    Matching is whole-word (word-boundary) to avoid false positives from
+    substrings like "cons" inside "consultation".
     """
     if question.count("?") > 1:
         return True
     q_lower = question.lower()
-    return any(kw in q_lower for kw in _ESCALATION_KEYWORDS) or any(
-        kw in q_lower for kw in _DETAIL_KEYWORDS
+    words = q_lower.split()
+    # Multi-word phrases checked first; then individual whole-word keywords.
+    if any(
+        phrase in q_lower
+        for phrase in (
+            "pros and cons",
+            "difference between",
+            "walk me through",
+            "step by step",
+            "in detail",
+        )
+    ):
+        return True
+    single_words = frozenset(words)
+    return bool(
+        single_words & _ESCALATION_KEYWORDS - {"pros and cons", "difference between"}
+        or single_words & _DETAIL_KEYWORDS - {"walk me through", "step by step", "in detail"}
     )
 
 

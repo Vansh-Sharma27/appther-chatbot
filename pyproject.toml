@@ -7,6 +7,9 @@ name = "appther-chatbot"
 version = "0.1.0"
 requires-python = ">=3.12"
 description = "RAG chatbot for appther.com — serverless-first"
+dependencies = [
+    "langdetect>=1.0.9",
+]
 
 [tool.setuptools.packages.find]
 include = ["crawler*", "api*", "eval*"]

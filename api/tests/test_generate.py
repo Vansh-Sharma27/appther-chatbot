@@ -21,9 +21,6 @@ from api.rag.types import Turn
 
 from .conftest import make_chunk, make_history
 
-pytestmark = pytest.mark.asyncio(loop_scope="function")
-
-
 # ── should_escalate ───────────────────────────────────────────────────────────
 
 
@@ -54,6 +51,17 @@ def test_escalate_walk_through():
 def test_escalate_simple_pricing():
     # Single question, no complexity signals → no escalation
     assert should_escalate("What is the price for Odoo implementation?") is False
+
+
+def test_escalate_consultation_does_not_match_cons_substring():
+    """'cons' inside 'consultation' or 'constraints' must NOT trigger escalation."""
+    assert should_escalate("What does a consultation cost?") is False
+    assert should_escalate("What are the project constraints?") is False
+
+
+def test_escalate_pros_keyword_only_matches_whole_word():
+    assert should_escalate("What are the pros of Odoo?") is True
+    assert should_escalate("Tell me about the prospects") is False
 
 
 # ── detect_language ───────────────────────────────────────────────────────────
@@ -159,10 +167,54 @@ def test_format_history_caps_to_max_turns():
     assert len(result) <= MAX_HISTORY_TURNS
 
 
+def test_question_length_guard_truncates():
+    """Oversized questions should be truncated by the length guard."""
+    from api.rag.prompt import MAX_QUESTION_CHARS
+
+    long_q = "a" * (MAX_QUESTION_CHARS + 100)
+    # rewrite_query should truncate
+    from api.rag.rewrite import rewrite_query
+
+    result = rewrite_query(long_q, history=[], api_key="fake")
+    assert len(result) <= MAX_QUESTION_CHARS
+
+
+def test_question_length_guard_preserves_short():
+    short_q = "What is ERP?"
+    from api.rag.rewrite import rewrite_query
+
+    result = rewrite_query(short_q, history=[], api_key="fake")
+    assert result == short_q
+
+
 def test_build_user_message_contains_context_and_question():
     msg = build_user_message("What is ERP?", "Context text here.")
     assert "What is ERP?" in msg
     assert "Context text here." in msg
+
+
+def test_format_context_includes_delimiters():
+    """Context must be wrapped in prompt-injection delimiters."""
+    chunk = make_chunk("c1", text="Some text")
+    result = format_context([chunk])
+    assert "BEGIN RETRIEVED CONTEXT" in result
+    assert "END RETRIEVED CONTEXT" in result
+
+
+def test_build_user_message_has_injection_delimiters():
+    """User message must have clear context/question boundaries."""
+    msg = build_user_message("Test?", "Some context.")
+    assert "RETRIEVED CONTEXT" in msg
+    assert "END OF CONTEXT" in msg
+    assert "USER QUESTION" in msg
+
+
+def test_system_prompt_has_injection_guard():
+    """System prompt must include the security boundary guard."""
+    from api.rag.prompt import SYSTEM_PROMPT
+
+    assert "untrusted content" in SYSTEM_PROMPT.lower()
+    assert "SECURITY BOUNDARY" in SYSTEM_PROMPT
 
 
 # ── generate_answer ───────────────────────────────────────────────────────────
@@ -175,6 +227,7 @@ async def _collect(gen) -> str:
     return "".join(parts)
 
 
+@pytest.mark.asyncio
 async def test_generate_declines_when_no_context():
     result = await _collect(
         generate_answer(
@@ -187,6 +240,7 @@ async def test_generate_declines_when_no_context():
     assert "contact" in result.lower() or "don't have" in result.lower()
 
 
+@pytest.mark.asyncio
 async def test_generate_does_not_call_gemini_when_no_context():
     """No context → decline immediately without an API call."""
     with patch("api.rag.generate._call_gemini") as mock_call:
@@ -202,6 +256,7 @@ async def test_generate_does_not_call_gemini_when_no_context():
     assert result  # non-empty decline message
 
 
+@pytest.mark.asyncio
 async def test_generate_calls_gemini_with_context(mocker):
     """With context chunks, Gemini must be called."""
     chunks = [make_chunk("c1", text="Appther pricing starts at $5000.")]
@@ -221,6 +276,7 @@ async def test_generate_calls_gemini_with_context(mocker):
     assert "5000" in result
 
 
+@pytest.mark.asyncio
 async def test_generate_uses_flash_lite_for_simple_query(mocker):
     """Simple question → Flash-Lite model selected."""
     chunks = [make_chunk()]
@@ -244,6 +300,7 @@ async def test_generate_uses_flash_lite_for_simple_query(mocker):
     assert captured["model"] == GEMINI_LITE_MODEL
 
 
+@pytest.mark.asyncio
 async def test_generate_escalates_for_complex_query(mocker):
     """Multi-part question → escalation model selected."""
     chunks = [make_chunk()]
@@ -267,6 +324,7 @@ async def test_generate_escalates_for_complex_query(mocker):
     assert captured["model"] == GEMINI_FLASH_MODEL
 
 
+@pytest.mark.asyncio
 async def test_generate_streams_incremental_chunks(mocker):
     """generate_answer must yield multiple tokens, not one big string."""
     chunks = [make_chunk()]

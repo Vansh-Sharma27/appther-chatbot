@@ -25,12 +25,14 @@ jobs:
     env:
       VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
       JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: us-east-1
       # LanceDB index URI — local path for CI dry-runs; override with s3:// in production
       LANCE_INDEX_URI: ${{ secrets.LANCE_INDEX_URI || './lance_index' }}
       STAGING_DIR: /tmp/staging
+
+    permissions:
+      id-token: write   # needed for OIDC role assumption
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +41,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CRAWLER_ROLE_ARN }}
+          aws-region: us-east-1
 
       - name: Install dependencies
         run: pip install -e ".[crawler,embed]"

@@ -90,11 +90,13 @@ The weekly crawl (`0 2 * * 0` — Sundays 02:00 UTC) is defined in `.github/work
 |---|---|
 | `VOYAGE_API_KEY` | Voyage AI embeddings + rerank |
 | `JINA_API_KEY` | Jina standby embeddings |
-| `AWS_ACCESS_KEY_ID` | S3 read/write for LanceDB index |
-| `AWS_SECRET_ACCESS_KEY` | S3 credentials |
+| `AWS_CRAWLER_ROLE_ARN` | IAM role ARN for OIDC-based S3 access (replaces static AWS keys) |
 | `LANCE_INDEX_URI` | LanceDB S3 URI (e.g. `s3://bucket/lance_index`) |
 
-The workflow uploads the report JSON as a CI artifact (retained 30 days) and fails the job if a drop-alert fires.
+The workflow uses GitHub OIDC to assume the crawler IAM role (`AWS_CRAWLER_ROLE_ARN`) instead of static AWS credentials. Before the first run:
+1. Create the GitHub OIDC provider in your AWS account (one-time setup).
+2. Deploy infra via Terraform to create the crawler IAM role with OIDC trust.
+3. Set `AWS_CRAWLER_ROLE_ARN` to the role's ARN in GitHub secrets.
 
 ## Implementation steps
 

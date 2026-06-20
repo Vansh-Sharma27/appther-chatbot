@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 
+from api.rag.prompt import MAX_QUESTION_CHARS
 from api.rag.types import Turn
 
 logger = logging.getLogger(__name__)
@@ -66,13 +67,13 @@ def rewrite_query(
     question is already self-contained (no context-dependent words found).
     """
     if not history or not _needs_rewrite(question):
-        return question
+        return question[:MAX_QUESTION_CHARS]
 
     try:
-        return _gemini_rewrite(question, history, api_key=api_key)
+        return _gemini_rewrite(question, history, api_key=api_key)[:MAX_QUESTION_CHARS]
     except Exception as exc:  # noqa: BLE001
         logger.warning("Query rewrite failed — using original question: %s", exc)
-        return question
+        return question[:MAX_QUESTION_CHARS]
 
 
 def _gemini_rewrite(
