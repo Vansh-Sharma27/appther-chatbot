@@ -9,10 +9,13 @@
 
 ```
 crawler/    ingestion pipeline (discovery, fetch, clean, chunk, embed, index)
-api/        FastAPI RAG endpoint (rewrite, retrieve, rerank, generate)
-widget/     embeddable React chat widget
+api/        FastAPI RAG endpoint + streaming Lambda handler
+            ├── main.py          FastAPI app, streaming /chat, /feedback, /lead, /health
+            ├── state.py         DynamoDB-backed answer cache, feedback, leads, content-gap log
+            └── rag/             RAG query core (rewrite, embed, retrieve, rerank, generate)
+widget/     embeddable React chat widget (Step 7 — coming next)
 infra/      Terraform (S3, DynamoDB, Lambda, CloudFront, WAF, ECR, Secrets)
-eval/       golden Q&A set + RAGAS harness + jailbreak probes
+eval/       golden Q&A set + RAGAS harness + jailbreak probes (Step 10)
 plans/      implementation notes and ADRs
 ```
 
@@ -55,9 +58,26 @@ terraform validate
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[crawler,embed,dev]"
+pip install -e ".[crawler,embed,api,dev]"
 pre-commit install
-pytest -q   # 315 tests across crawler (Steps 1–4) and api
+pytest -q   # 457+ tests across crawler (Steps 1–4) and api (Steps 5–6)
+```
+
+### Running the API locally
+
+```bash
+# Requires VOYAGE_API_KEY, GEMINI_API_KEY, and a built LanceDB index
+export LANCE_INDEX_URI=./lance_index
+export DYNAMODB_TABLE=appther-chatbot-main
+uvicorn api.main:app --reload --port 8000
+```
+
+Then:
+
+```bash
+curl -N http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What does Appther do?"}'
 ```
 
 ## Running the crawl pipeline
@@ -100,4 +120,16 @@ The workflow uses GitHub OIDC to assume the crawler IAM role (`AWS_CRAWLER_ROLE_
 
 ## Implementation steps
 
-See `plans/` and the full architecture doc for the 10-step build plan.
+| Step | Status | Description |
+|------|--------|-------------|
+| 0 | ✅ | Project scaffold & infra foundation |
+| 1 | ✅ | Crawler: discovery + fetch |
+| 2 | ✅ | Clean, normalize, dedupe & chunk |
+| 3 | ✅ | Embeddings & LanceDB index on S3 |
+| 4 | ✅ | Crawl verification & refresh scheduling |
+| 5 | ✅ | RAG query core (rewrite, retrieve, rerank, generate) |
+| 6 | ✅ | **FastAPI Lambda endpoint + guardrails & state** |
+| 7 | ⬜ | Embeddable React chat widget |
+| 8 | ⬜ | Deployment & edge security (CloudFront + WAF) |
+| 9 | ⬜ | Observability & cost controls |
+| 10 | ⬜ | Evaluation & hardening gate |

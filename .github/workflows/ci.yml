@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dev tools
-        run: pip install -e ".[crawler,embed,dev]"
+        run: pip install -e ".[crawler,embed,api,dev]"
       - name: Lint
         run: ruff check .
       - name: Format check
