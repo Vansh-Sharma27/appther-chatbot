@@ -4,7 +4,41 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import boto3
+import pytest
+from moto import mock_aws
+
 from api.rag.types import RetrievedChunk, Turn
+
+
+@pytest.fixture
+def dynamo_client():
+    """Create a mock DynamoDB table matching the production schema (pk/sk single-table design).
+
+    The table uses on-demand billing with TTL enabled on expires_at, mirroring
+    infrastructure/dynamodb.tf exactly so the state layer tests validate the
+    real schema.
+    """
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        client.create_table(
+            TableName="appther-chatbot-main",
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        client.update_time_to_live(
+            TableName="appther-chatbot-main",
+            TimeToLiveSpecification={"Enabled": True, "AttributeName": "expires_at"},
+        )
+        yield client
+
 
 DIMS = 512
 
