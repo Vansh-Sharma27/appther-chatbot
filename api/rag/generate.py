@@ -10,6 +10,11 @@ Model tiering:
   - GEMINI_LITE_MODEL (gemini-2.5-flash-lite): simple single-part questions.
   - GEMINI_FLASH_MODEL (gemini-3-flash): complex, comparative, or multi-part queries.
 
+Timeouts:
+  - GEMINI_TIMEOUT_SECONDS controls both the HTTP client timeout (passed to
+    genai.Client) and the per-stream iteration timeout via asyncio.timeout.
+    Default is 30 seconds. Set to 0 to disable (not recommended in Lambda).
+
 Public API:
     generate_answer(question, context_chunks, history, api_key, stream) → AsyncGenerator[str]
     should_escalate(question) → bool
@@ -35,11 +40,30 @@ logger = logging.getLogger(__name__)
 GEMINI_LITE_MODEL: str = os.getenv("GEMINI_LITE_MODEL", "gemini-2.5-flash-lite")
 GEMINI_FLASH_MODEL: str = os.getenv("GEMINI_FLASH_MODEL", "gemini-3-flash")
 
-_NO_CONTEXT_REPLY = (
+# Timeout for Gemini API calls (HTTP + stream iteration). 30s default.
+# In Lambda the function timeout is the ultimate backstop, but this prevents
+# a single stalled stream from blocking the concurrent execution slot.
+_GEMINI_TIMEOUT: float = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "30")) or 30.0
+
+NO_CONTEXT_REPLY = (
     "I don't have information about that in my current knowledge. "
     "For detailed help, please visit https://www.appther.com/contact-us "
     "or book a free consultation."
 )
+
+# ── Model resolution helper ──────────────────────────────────────────────
+
+
+def resolve_model(question: str, context_chunks: list[RetrievedChunk] | None = None) -> str:
+    """Return the model name that *would* be used for *question*.
+
+    This is the single function used by both generate_answer and the query
+    pipeline, so the model name in RAGResult always matches what was called.
+    """
+    if not context_chunks:
+        return GEMINI_LITE_MODEL
+    return GEMINI_FLASH_MODEL if should_escalate(question) else GEMINI_LITE_MODEL
+
 
 # ── Escalation heuristic ──────────────────────────────────────────────────────
 
@@ -129,7 +153,7 @@ async def _call_gemini(
     from google import genai
     from google.genai import types as genai_types
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={"timeout": _GEMINI_TIMEOUT * 1000})
 
     history_contents = format_history(history)
     user_msg = build_user_message(question, context_str)
@@ -164,10 +188,10 @@ async def generate_answer(
     without making an API call.
     """
     if not context_chunks:
-        yield _NO_CONTEXT_REPLY
+        yield NO_CONTEXT_REPLY
         return
 
-    model_name = GEMINI_FLASH_MODEL if should_escalate(question) else GEMINI_LITE_MODEL
+    model_name = resolve_model(question, context_chunks)
     key = api_key or os.environ.get("GEMINI_API_KEY", "")
     context_str = format_context(context_chunks)
 

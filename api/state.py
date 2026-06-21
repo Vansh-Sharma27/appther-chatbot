@@ -169,7 +169,15 @@ class ContentGapLog:
         self._client.put_item(TableName=self._table_name, Item=item)
 
     def recent(self, limit: int = 20) -> list[dict]:
-        """Return the most recent content-gap entries, up to *limit*."""
+        """Return the most recent content-gap entries, up to *limit*.
+
+        NOTE: Uses a DynamoDB Scan with a FilterExpression, which reads every
+        item in the table before applying the filter. This is acceptable at
+        launch scale (a few thousand cache entries) but should be migrated to
+        a GSI-query pattern once the table grows beyond ~10k items or the
+        content-gap backlog becomes a frequently-used dashboard. See the GSI
+        migration note in infra/variables.tf.
+        """
         resp = self._client.scan(
             TableName=self._table_name,
             FilterExpression="begins_with(pk, :prefix)",

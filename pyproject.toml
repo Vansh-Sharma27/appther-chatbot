@@ -56,6 +56,7 @@ api = [
     "pydantic[email]>=2.0",
     "boto3>=1.34",
     "mangum>=0.17",
+    "slowapi>=0.1.9",
 ]
 dev = [
     "ruff==0.5.0",
@@ -79,3 +80,8 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["crawler/tests", "api/tests", "eval"]
 addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "moto>=5.2.2",
+]

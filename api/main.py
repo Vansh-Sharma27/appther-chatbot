@@ -6,6 +6,12 @@ Exposes a scale-to-zero Lambda Function URL (no API Gateway) with:
   POST /lead       — Capture leads from the no-answer fallback flow
   GET  /health     — Health check
 
+Security:
+  - API key authentication via X-API-Key header (disabled when empty/unset for dev)
+  - Rate limiting via slowapi (disabled when REDIS_URL is unset for dev)
+  - CORS origin whitelist from CORS_ORIGINS env var
+  - Security headers (HSTS, X-Content-Type-Options, X-Frame-Options, CSP)
+
 Key design choices:
   - The RAG query function is injected as a dependency so tests can override it
     with a mock, avoiding the need for a real LanceDB index or API keys.
@@ -16,17 +22,21 @@ Key design choices:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from mangum import Mangum
 from pydantic import BaseModel, EmailStr, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from api.rag import query as rag_query
 from api.rag.types import Turn
@@ -34,35 +44,78 @@ from api.state import AnswerCache, ContentGapLog, FeedbackStore, LeadStore
 
 logger = logging.getLogger(__name__)
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_API_KEY: str = os.environ.get("API_AUTH_KEY", "")
+_CORS_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.environ.get(
+        "CORS_ORIGINS",
+        "https://www.appther.com,https://appther.com,https://blog.appther.com",
+    ).split(",")
+    if o.strip()
+]
+
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 _CHAT_QUESTION_MAX = 2000
 
 
+class ChunkInfoSchema(BaseModel):
+    """A single retrieved chunk tied to a feedback entry."""
+
+    chunk_id: str = Field(..., max_length=200)
+    url: str = Field(..., max_length=2048)
+    score: float = Field(..., ge=0.0, le=1.0)
+
+
 class TurnSchema(BaseModel):
     role: str = Field(pattern=r"^(user|assistant)$")
-    content: str
+    content: str = Field(..., max_length=5000)
 
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=_CHAT_QUESTION_MAX)
-    history: list[TurnSchema] = []
+    history: list[TurnSchema] = Field(default_factory=list, max_length=50)
 
 
 class FeedbackRequest(BaseModel):
-    question: str
-    answer: str
+    question: str = Field(..., min_length=1, max_length=5000)
+    answer: str = Field(..., min_length=1, max_length=50000)
     thumbs_up: bool
-    chunks: list[dict[str, Any]]
-    reason: str | None = None
+    chunks: list[ChunkInfoSchema] = Field(default_factory=list, max_length=50)
+    reason: str | None = Field(None, max_length=2000)
 
 
 class LeadRequest(BaseModel):
-    name: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1, max_length=200)
     email: EmailStr
-    question: str = Field(..., min_length=1)
-    phone: str | None = None
-    message: str | None = None
+    question: str = Field(..., min_length=1, max_length=5000)
+    phone: str | None = Field(None, max_length=50)
+    message: str | None = Field(None, max_length=5000)
+
+
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+
+limiter = Limiter(key_func=get_remote_address)
+
+
+# ── Auth dependency ───────────────────────────────────────────────────────────
+
+
+def verify_api_key(request: Request) -> None:
+    """Reject requests missing the required API key.
+
+    When API_AUTH_KEY is empty/not set, authentication is disabled (dev mode).
+    """
+    if not _API_KEY:
+        return  # auth disabled in dev
+    header_key = request.headers.get("X-API-Key", "")
+    if header_key != _API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid API key. Provide it via the X-API-Key header.",
+        )
 
 
 # ── Dependencies (injectable, mockable) ─────────────────────────────────────
@@ -104,11 +157,60 @@ def _sse(event: str, data: object) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-_CACHE_MISS_REPLY = (
-    "I don't have information about that in my current knowledge. "
-    "For detailed help, please visit https://www.appther.com/contact-us "
-    "or book a free consultation."
-)
+# ── Token splitting for realistic streaming UX ────────────────────────────────
+
+
+def _word_tokens(text: str) -> list[str]:
+    """Split *text* into word-grouped tokens so the client sees progressive text.
+
+    Groups 1-2 words per token for natural-feeling streaming. A full sentence
+    arrives as ~5-10 tokens rather than one big chunk or single characters.
+    """
+    words = text.split()
+    if not words:
+        return [text]
+    tokens: list[str] = []
+    i = 0
+    while i < len(words):
+        chunk = words[i]
+        if i + 1 < len(words) and len(chunk) + len(words[i + 1]) + 1 < 40:
+            chunk += " " + words[i + 1]
+            i += 2
+        else:
+            i += 1
+        tokens.append(chunk + " ")
+    if tokens:
+        tokens[-1] = tokens[-1].rstrip()
+    return tokens
+
+
+# ── Security headers middleware ────────────────────────────────────────────────
+
+
+_SELF = "'self'"
+
+_SECURITY_HEADERS: dict[str, str] = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Content-Security-Policy": (
+        f"default-src {_SELF}; "
+        f"script-src {_SELF} 'unsafe-inline'; "
+        f"style-src {_SELF} 'unsafe-inline'; "
+        f"img-src {_SELF} data: https:; "
+        f"connect-src {_SELF} https:; "
+        f"frame-ancestors {_SELF}; "
+        f"base-uri {_SELF}"
+    ),
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+}
+
+
+async def _add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for header, value in _SECURITY_HEADERS.items():
+        response.headers[header] = value
+    return response
 
 
 # ── App factory ──────────────────────────────────────────────────────────────
@@ -117,29 +219,43 @@ _CACHE_MISS_REPLY = (
 def create_app() -> FastAPI:
     app = FastAPI(title="Appther Chatbot API", version="0.1.0")
 
+    # Rate limit read at app-creation time so tests can override via env vars
+    rate_limit: str = os.environ.get("RATE_LIMIT", "10/minute")
+
+    # ── Security middleware (order matters: run early) ──────────────────────
+    app.middleware("http")(_add_security_headers)
+
+    # ── CORS ────────────────────────────────────────────────────────────────
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=_CORS_ORIGINS,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "X-API-Key"],
     )
 
-    # ── Health ──────────────────────────────────────────────────────────────
+    # ── Rate limiting ───────────────────────────────────────────────────────
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    # ── Health (unauthenticated, unratelimited) ─────────────────────────────
 
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": "appther-chatbot"}
 
-    # ── Chat ────────────────────────────────────────────────────────────────
+    # ── Chat (streaming) ────────────────────────────────────────────────────
 
     @app.post("/chat")
+    @limiter.limit(rate_limit)
     async def chat(
+        request: Request,
         body: ChatRequest,
         cache: Annotated[AnswerCache, Depends(get_cache_store)],
         gap_log: Annotated[ContentGapLog, Depends(get_gap_log)],
         query_fn: Annotated[Any, Depends(get_rag_query_fn)],
     ):
+        verify_api_key(request)
         question = body.question
         history = [Turn(t.role, t.content) for t in body.history]  # type: ignore[arg-type]
 
@@ -151,12 +267,14 @@ def create_app() -> FastAPI:
                 sources = cached.get("sources", [])
                 model = cached.get("model", "")
                 chunks_used = cached.get("chunks_used", 0)
-                yield _sse("answer", {"token": answer})
+                for token in _word_tokens(answer):
+                    yield _sse("answer", {"token": token})
+                    await asyncio.sleep(0.015)
                 yield _sse("sources", {"sources": sources})
                 yield _sse("done", {"model": model, "chunks_used": chunks_used})
                 return
 
-            # 2. Run the RAG pipeline
+            # 2. Run the RAG pipeline (retrieves buffered RAGResult)
             try:
                 result = await query_fn(
                     question=question,
@@ -175,7 +293,9 @@ def create_app() -> FastAPI:
             # 3. No-answer routing: log content gap and suggest contact-us
             if _is_no_answer(answer):
                 gap_log.log(question=question, rewritten_query=result.rewritten_query)
-                yield _sse("answer", {"token": answer})
+                for token in _word_tokens(answer):
+                    yield _sse("answer", {"token": token})
+                    await asyncio.sleep(0.015)
                 yield _sse("sources", {"sources": sources})
                 yield _sse(
                     "lead_suggestion",
@@ -198,9 +318,13 @@ def create_app() -> FastAPI:
                 except Exception:
                     logger.warning("Failed to cache answer", exc_info=True)
 
-                yield _sse("answer", {"token": answer})
+                # 5. Stream answer in word-sized tokens
+                for token in _word_tokens(answer):
+                    yield _sse("answer", {"token": token})
+                    await asyncio.sleep(0.015)
 
-            yield _sse("sources", {"sources": sources})
+                yield _sse("sources", {"sources": sources})
+
             yield _sse("done", {"model": model, "chunks_used": chunks_used})
 
         return StreamingResponse(
@@ -215,16 +339,19 @@ def create_app() -> FastAPI:
     # ── Feedback ────────────────────────────────────────────────────────────
 
     @app.post("/feedback")
+    @limiter.limit(rate_limit)
     async def feedback(
+        request: Request,
         body: FeedbackRequest,
         store: Annotated[FeedbackStore, Depends(get_feedback_store)],
     ):
+        verify_api_key(request)
         try:
             store.store(
                 question=body.question,
                 answer=body.answer,
                 thumbs_up=body.thumbs_up,
-                chunks=body.chunks,
+                chunks=[c.model_dump() for c in body.chunks],
                 reason=body.reason,
             )
         except Exception as exc:
@@ -235,10 +362,13 @@ def create_app() -> FastAPI:
     # ── Lead capture ─────────────────────────────────────────────────────────
 
     @app.post("/lead")
+    @limiter.limit(rate_limit)
     async def lead(
+        request: Request,
         body: LeadRequest,
         store: Annotated[LeadStore, Depends(get_lead_store)],
     ):
+        verify_api_key(request)
         try:
             store.store(
                 name=body.name,

@@ -86,7 +86,8 @@ def _gemini_rewrite(
     from google.genai import types as genai_types
 
     key = api_key or os.environ.get("GEMINI_API_KEY", "")
-    client = genai.Client(api_key=key)
+    timeout = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "30")) or 30.0
+    client = genai.Client(api_key=key, http_options={"timeout": timeout * 1000})
 
     recent = history[-_MAX_HISTORY_TURNS:]
     conv_lines = []

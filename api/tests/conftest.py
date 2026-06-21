@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock
 
 import boto3
@@ -9,6 +10,19 @@ import pytest
 from moto import mock_aws
 
 from api.rag.types import RetrievedChunk, Turn
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _test_env() -> None:
+    """Disable auth and rate limiting for all API tests.
+
+    These env vars are set once at session start so every test can call the
+    endpoints without authentication or hitting rate limits. Production
+    behaviour is governed by leaving these unset in the deployed environment
+    (auth disabled) or setting them to real values (auth enabled).
+    """
+    os.environ.setdefault("API_AUTH_KEY", "")
+    os.environ.setdefault("RATE_LIMIT", "1000/minute")
 
 
 @pytest.fixture
