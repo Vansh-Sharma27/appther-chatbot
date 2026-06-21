@@ -36,3 +36,15 @@ def robots_txt() -> str:
 @pytest.fixture()
 def homepage_html() -> str:
     return fixture_text("homepage.html")
+
+
+@pytest.fixture()
+def main_urlset_xml() -> str:
+    """A <urlset> root sitemap matching the live appther.com structure (no sitemapindex)."""
+    return fixture_text("main_urlset.xml")
+
+
+@pytest.fixture()
+def blog_subdomain_sitemap_xml() -> str:
+    """A blog sitemap whose URLs live on the blog.appther.com subdomain."""
+    return fixture_text("blog_subdomain_sitemap.xml")

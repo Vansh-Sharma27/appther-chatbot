@@ -131,8 +131,13 @@ class TestIsInternal:
     def test_relative_url_is_internal(self):
         assert is_internal("/services/odoo-erp/", self.BASE) is True
 
-    def test_subdomain_is_external(self):
-        assert is_internal("https://blog.appther.com/post", self.BASE) is False
+    def test_subdomain_is_internal(self):
+        """blog.appther.com is a subdomain of appther.com -> must be internal."""
+        assert is_internal("https://blog.appther.com/post", self.BASE) is True
+
+    def test_unrelated_domain_is_external(self):
+        """A completely different domain must be external."""
+        assert is_internal("https://other-company.com", self.BASE) is False
 
     def test_case_insensitive_host(self):
         assert is_internal("https://WWW.APPTHER.COM/faq", self.BASE) is True

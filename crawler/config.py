@@ -5,6 +5,7 @@ import os
 # ── Site ──────────────────────────────────────────────────────────────────────
 BASE_URL = "https://www.appther.com"
 SITEMAP_URL = "https://www.appther.com/sitemap.xml"
+BLOG_SITEMAP_URL = "https://www.appther.com/blog-sitemap.xml"
 ROBOTS_URL = "https://www.appther.com/robots.txt"
 LLMS_TXT_URL = "https://www.appther.com/llms.txt"
 LLMS_FULL_URL = "https://www.appther.com/llms-full.txt"

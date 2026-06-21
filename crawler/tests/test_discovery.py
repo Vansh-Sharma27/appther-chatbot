@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 
 from pytest_httpx import HTTPXMock
 
-from crawler.config import BASE_URL, SITEMAP_URL
+from crawler.config import BASE_URL, BLOG_SITEMAP_URL, SITEMAP_URL
 from crawler.discovery import (
     _extract_internal_links,
     _filter_and_dedupe,
@@ -549,3 +549,58 @@ class TestDiscoverUrlsStats:
 
         assert isinstance(urls, list)
         assert all(isinstance(u, DiscoveredURL) for u in urls)
+
+    # ── Live-site scenario: urlset + explicit blog sitemap ─────────────────
+
+    def test_live_urlset_sitemap_discovers_blog_urls(
+        self,
+        httpx_mock: HTTPXMock,
+        main_urlset_xml: str,
+        blog_subdomain_sitemap_xml: str,
+        robots_txt: str,
+    ):
+        """The live sitemap.xml is a <urlset> -- no auto-discovery of blog URLs.
+        The blog sitemap must be fetched explicitly. Blog URLs live on the
+        blog.appther.com subdomain and should be treated as internal.
+        """
+        httpx_mock.add_response(url=SITEMAP_URL, text=main_urlset_xml)
+        httpx_mock.add_response(url=BLOG_SITEMAP_URL, text=blog_subdomain_sitemap_xml)
+
+        with create_client() as client:
+            robots = _robots_from_fixture(robots_txt)
+            urls = discover_urls(
+                client, robots, sitemap_url=SITEMAP_URL, include_bfs_fallback=False
+            )
+
+        all_urls = {e.url for e in urls}
+        # Blog subdomain URLs should be discovered
+        assert any(
+            "blog.appther.com" in u for u in all_urls
+        ), "blog.appther.com URLs were not discovered"
+        assert any("odoo-implementation-tips" in u for u in all_urls)
+        assert any("erp-roi-case-study" in u for u in all_urls)
+        # Main site URLs should also be present
+        assert any(
+            "www.appther.com/faq" in u or "/faq" in u and "blog" not in u for u in all_urls
+        ), "Main site URLs missing"
+
+    def test_live_urlset_blog_has_blog_source(
+        self,
+        httpx_mock: HTTPXMock,
+        main_urlset_xml: str,
+        blog_subdomain_sitemap_xml: str,
+        robots_txt: str,
+    ):
+        """Blog subdomain URLs should carry source='blog-sitemap'."""
+        httpx_mock.add_response(url=SITEMAP_URL, text=main_urlset_xml)
+        httpx_mock.add_response(url=BLOG_SITEMAP_URL, text=blog_subdomain_sitemap_xml)
+
+        with create_client() as client:
+            robots = _robots_from_fixture(robots_txt)
+            urls = discover_urls(
+                client, robots, sitemap_url=SITEMAP_URL, include_bfs_fallback=False
+            )
+
+        blog_entries = [e for e in urls if "blog.appther.com" in e.url]
+        assert len(blog_entries) > 0
+        assert all(e.source == "blog-sitemap" for e in blog_entries)

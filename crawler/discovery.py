@@ -33,6 +33,7 @@ from crawler.config import (
     BASE_URL,
     BFS_MAX_DEPTH,
     BFS_MAX_URLS,
+    BLOG_SITEMAP_URL,
     DEFAULT_CRAWL_DELAY_SECONDS,
     SITEMAP_URL,
 )
@@ -70,7 +71,7 @@ def discover_urls(
     filtering (the caller feeds ``robots_filtered`` into the crawl report's
     ``robots_excluded`` field).
     """
-    urls = _fetch_sitemap_tree(client, sitemap_url)
+    urls = _fetch_sitemap_tree(client, sitemap_url, blog_sitemap_url=BLOG_SITEMAP_URL)
 
     if not urls and include_bfs_fallback:
         logger.warning("Sitemap returned no URLs — falling back to BFS from %s", BASE_URL)
@@ -89,12 +90,17 @@ def discover_urls(
 def _fetch_sitemap_tree(
     client: httpx.Client,
     sitemap_url: str = SITEMAP_URL,
+    blog_sitemap_url: str | None = BLOG_SITEMAP_URL,
 ) -> list[DiscoveredURL]:
     """Fetch the root sitemap and recursively retrieve all child sitemaps.
 
     Handles both sitemap indexes (<sitemapindex>) and plain urlsets (<urlset>).
     A single level of indirection is followed (index → children); deeper nesting
     is not expected for appther.com and is skipped with a warning.
+
+    When the root sitemap is a plain <urlset> (the live appther.com scenario),
+    and *blog_sitemap_url* is given, the blog sitemap is fetched explicitly
+    since it is not referenced from within the root.
     """
     logger.info("Fetching root sitemap: %s", sitemap_url)
     try:
@@ -118,10 +124,77 @@ def _fetch_sitemap_tree(
         return _expand_sitemap_index(client, root)
     elif local_tag == "urlset":
         source = _source_from_url(sitemap_url)
-        return _parse_urlset(root, source=source)
+        urls = _parse_urlset(root, source=source)
+        # When the root is a plain urlset, blog URLs are not auto-discovered.
+        # Fetch the blog sitemap explicitly if provided.
+        if blog_sitemap_url:
+            _merge_blog_sitemap(client, blog_sitemap_url, urls)
+        return urls
     else:
         logger.warning("Unknown root element <%s> in %s — skipping", local_tag, sitemap_url)
         return []
+
+
+def _merge_blog_sitemap(
+    client: httpx.Client,
+    blog_sitemap_url: str,
+    urls: list[DiscoveredURL],
+) -> None:
+    """Fetch the blog sitemap and merge its URLs into *urls* (in-place).
+
+    Blog URLs whose ``.url`` already exists in the list are skipped to avoid
+    duplicates when a page is listed in both the main sitemap and the blog
+    sitemap (e.g. ``/blogs`` index page).
+    """
+    try:
+        blog_response = client.get(blog_sitemap_url)
+        blog_response.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning("Failed to fetch blog sitemap (%s): %s", blog_sitemap_url, exc)
+        return
+
+    try:
+        blog_root = ET.fromstring(blog_response.text)
+    except ET.ParseError as exc:
+        logger.warning("Malformed XML in blog sitemap %s: %s", blog_sitemap_url, exc)
+        return
+
+    child_local = _local_tag(blog_root.tag)
+    if child_local == "urlset":
+        entries = _parse_urlset(blog_root, source="blog-sitemap")
+    elif child_local == "sitemapindex":
+        # blog-sitemap.xml is itself an index (live scenario points to
+        # blog.appther.com child sitemaps). Follow one level.
+        child_urls = _parse_sitemap_index(blog_root)
+        entries = []
+        for child_url in child_urls:
+            try:
+                child_resp = client.get(child_url)
+                child_resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.warning("Failed to fetch blog child sitemap %s: %s", child_url, exc)
+                continue
+            try:
+                child_root = ET.fromstring(child_resp.text)
+            except ET.ParseError as exc:
+                logger.warning("Malformed XML in %s: %s", child_url, exc)
+                continue
+            if _local_tag(child_root.tag) == "urlset":
+                entries.extend(_parse_urlset(child_root, source="blog-sitemap"))
+        logger.info("  → %d blog URLs from blog sitemap index", len(entries))
+    else:
+        logger.warning("Unknown blog sitemap root <%s> — skipping", child_local)
+        return
+
+    existing = {u.url for u in urls}
+    added = 0
+    for entry in entries:
+        if entry.url not in existing:
+            urls.append(entry)
+            existing.add(entry.url)
+            added += 1
+    if added:
+        logger.info("Merged %d blog URLs from %s", added, blog_sitemap_url)
 
 
 def _expand_sitemap_index(
