@@ -2,11 +2,16 @@ import {
   useState,
   useRef,
   useEffect,
+  useCallback,
   type FormEvent,
   type KeyboardEvent,
 } from "react";
 import { createChatClient } from "../client";
 import type { Turn } from "../types";
+
+// Cap messages to prevent unbounded memory growth in long conversations.
+// Oldest history messages are dropped first; only the last MAX_MESSAGES remain.
+const MAX_MESSAGES = 50;
 
 interface Message {
   id: string;
@@ -30,6 +35,16 @@ function generateId(): string {
   return `msg-${_idCounter}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Return true when *url* uses an allowed scheme (http or https only). */
+function isValidUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export interface ChatWidgetProps {
   apiBaseUrl: string;
   title?: string;
@@ -49,41 +64,88 @@ export function ChatWidget({
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const clientRef = useRef(createChatClient({ baseUrl: apiBaseUrl }));
-  const lastAnswerMsgId = useRef<string | null>(null);
+  // Ref to the in-progress assistant message ID so we can update it
+  const pendingMsgIdRef = useRef<string | null>(null);
 
+  // Auto-scroll when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Cap messages to MAX_MESSAGES by dropping oldest history entries.
+  // Always keep the most recent messages.
   function addMessage(
     role: "user" | "assistant",
     content: string,
     opts?: Partial<Message>
-  ) {
+  ): string {
     const id = generateId();
-    setMessages((prev) => [...prev, { id, role, content, ...opts }]);
+    setMessages((prev) => {
+      const updated = [...prev, { id, role, content, ...opts }];
+      if (updated.length > MAX_MESSAGES) {
+        return updated.slice(updated.length - MAX_MESSAGES);
+      }
+      return updated;
+    });
     return id;
   }
 
-  const handleSend = async (e?: FormEvent) => {
+  // Append a token to the last assistant message (for streaming)
+  function appendAssistantToken(token: string) {
+    const targetId = pendingMsgIdRef.current;
+    if (!targetId) return;
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === targetId ? { ...m, content: m.content + token } : m
+      )
+    );
+  }
+
+  // Update sources on the in-progress assistant message
+  function setAssistantSources(sources: string[]) {
+    const targetId = pendingMsgIdRef.current;
+    if (!targetId) return;
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === targetId ? { ...m, sources } : m
+      )
+    );
+  }
+
+  const handleSend = useCallback(
+    async (e?: FormEvent) => {
       e?.preventDefault();
       const q = input.trim();
       if (!q || loading) return;
 
       setInput("");
-      addMessage("user", q);
-      setLoading(true);
       setLead(null);
 
+      // Build history BEFORE adding the current message so the question
+      // isn't duplicated (sent both as `question` and inside `history`).
       const history: Turn[] = messages.map((m) => ({
         role: m.role,
         content: m.content,
       }));
 
+      // Now add the current user message to the UI
+      addMessage("user", q);
+      setLoading(true);
+
+      // Create a placeholder assistant message and update it progressively
+      const assistantMsgId = addMessage("assistant", "");
+      pendingMsgIdRef.current = assistantMsgId;
+
       try {
         const result = await clientRef.current.chat({
           question: q,
           history,
+          onToken: (token) => {
+            appendAssistantToken(token);
+          },
+          onSources: (sources) => {
+            setAssistantSources(sources);
+          },
           onLeadSuggestion: (data) => {
             const d = data as { message: string };
             setLead({
@@ -95,18 +157,36 @@ export function ChatWidget({
           },
         });
 
-        const msgId = addMessage("assistant", result.answer, {
-          sources: result.sources,
-        });
-        lastAnswerMsgId.current = msgId;
+        // If streaming callbacks already rendered the full answer, the
+        // message is complete. Verify it has content (in case onToken was
+        // never called, e.g. empty answer).
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId && !m.content
+              ? { ...m, content: result.answer, sources: result.sources }
+              : m
+          )
+        );
       } catch (err) {
         const errorMsg =
-          err instanceof Error ? err.message : "An unexpected error occurred";
-        addMessage("assistant", errorMsg, { isError: true });
+          err instanceof Error
+            ? err.message
+            : "An unexpected error occurred";
+        // Replace the empty placeholder with the error message
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? { ...m, content: errorMsg, isError: true }
+              : m
+          )
+        );
       } finally {
+        pendingMsgIdRef.current = null;
         setLoading(false);
       }
-    }
+    },
+    [input, loading, messages]
+  );
 
   function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -116,10 +196,11 @@ export function ChatWidget({
   }
 
   async function handleFeedback(thumbsUp: boolean) {
-    const lastAnswer = messages.find(
-      (m) => m.id === lastAnswerMsgId.current && m.role === "assistant"
-    );
-    if (!lastAnswer) return;
+    // Find the last non-error assistant message
+    const lastAssistant = [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && !m.isError && m.content);
+    if (!lastAssistant) return;
 
     const userMsg = [...messages]
       .reverse()
@@ -128,7 +209,7 @@ export function ChatWidget({
     try {
       await clientRef.current.feedback({
         question: userMsg?.content ?? "",
-        answer: lastAnswer.content,
+        answer: lastAssistant.content,
         thumbs_up: thumbsUp,
         chunks: [],
       });
@@ -156,14 +237,11 @@ export function ChatWidget({
     }
   }
 
-  const showFeedback =
-    lastAnswerMsgId.current &&
-    messages.some(
-      (m) =>
-        m.id === lastAnswerMsgId.current &&
-        m.role === "assistant" &&
-        !m.isError
-    );
+  // Show feedback for the last non-error assistant message
+  const lastNonErrorAssistant = [...messages]
+    .reverse()
+    .find((m) => m.role === "assistant" && !m.isError && m.content);
+  const showFeedback = !!lastNonErrorAssistant && !loading;
 
   return (
     <div style={styles.container}>
@@ -197,11 +275,13 @@ export function ChatWidget({
                   ...(msg.isError ? styles.errorMessage : {}),
                 }}
               >
-                <div style={styles.messageContent}>{msg.content}</div>
+                <div style={styles.messageContent}>
+                  {msg.content || ""}
+                </div>
                 {msg.sources && msg.sources.length > 0 && (
                   <div style={styles.sources}>
                     <span style={styles.sourcesLabel}>Sources: </span>
-                    {msg.sources.map((src, i) => (
+                    {msg.sources.filter(isValidUrl).map((src, i) => (
                       <a
                         key={i}
                         href={src}
@@ -218,13 +298,13 @@ export function ChatWidget({
               </div>
             ))}
 
-            {loading && (
+            {loading && !pendingMsgIdRef.current && (
               <div style={{ ...styles.message, ...styles.loadingIndicator }}>
                 Thinking...
               </div>
             )}
 
-            {showFeedback && !loading && (
+            {showFeedback && (
               <div style={styles.feedbackRow}>
                 <span style={styles.feedbackLabel}>Was this helpful?</span>
                 <button
@@ -384,6 +464,7 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: "85%",
     alignSelf: "flex-start",
     wordBreak: "break-word",
+    whiteSpace: "pre-wrap",
   },
   userMessage: {
     background: "#2563eb",
