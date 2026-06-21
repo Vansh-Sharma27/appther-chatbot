@@ -47,12 +47,14 @@ function isValidUrl(url: string): boolean {
 
 export interface ChatWidgetProps {
   apiBaseUrl: string;
+  apiKey?: string;
   title?: string;
   placeholder?: string;
 }
 
 export function ChatWidget({
   apiBaseUrl,
+  apiKey,
   title = "Appther Chat",
   placeholder = "Type your message...",
 }: ChatWidgetProps) {
@@ -63,7 +65,9 @@ export function ChatWidget({
   const [lead, setLead] = useState<LeadInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const clientRef = useRef(createChatClient({ baseUrl: apiBaseUrl }));
+  const clientRef = useRef(
+    createChatClient({ baseUrl: apiBaseUrl, apiKey })
+  );
   // Ref to the in-progress assistant message ID so we can update it
   const pendingMsgIdRef = useRef<string | null>(null);
 

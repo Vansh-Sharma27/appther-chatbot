@@ -45,7 +45,11 @@ class AnswerCache:
         return f"CACHE#{digest}"
 
     def get(self, question: str) -> dict | None:
-        """Return the cached RAGResult dict for *question*, or None."""
+        """Return the cached RAGResult dict for *question*, or None.
+
+        Returns None for logically expired entries even if DynamoDB TTL hasn't
+        deleted them yet (TTL deletion is best-effort and can lag ~48h).
+        """
         pk = self._pk(question)
         resp = self._client.get_item(
             TableName=self._table_name,
@@ -54,6 +58,13 @@ class AnswerCache:
         item = resp.get("Item")
         if not item or "data" not in item:
             return None
+
+        # Read-time expiry check: DynamoDB TTL is best-effort and can lag
+        # up to ~48 hours, so we must verify freshness ourselves.
+        expires_at = int(item.get("expires_at", {}).get("N", "0"))
+        if expires_at and time.time() > expires_at:
+            return None
+
         return json.loads(item["data"]["S"])
 
     def set(self, question: str, result: dict, ttl_seconds: int = _DEFAULT_CACHE_TTL) -> None:
@@ -171,27 +182,33 @@ class ContentGapLog:
     def recent(self, limit: int = 20) -> list[dict]:
         """Return the most recent content-gap entries, up to *limit*.
 
-        NOTE: Uses a DynamoDB Scan with a FilterExpression, which reads every
-        item in the table before applying the filter. This is acceptable at
-        launch scale (a few thousand cache entries) but should be migrated to
-        a GSI-query pattern once the table grows beyond ~10k items or the
-        content-gap backlog becomes a frequently-used dashboard. See the GSI
-        migration note in infra/variables.tf.
+        Uses a DynamoDB Scan with a FilterExpression against the GAP# prefix.
+        NOTE: This scans every item in the table before applying the filter,
+        which is acceptable at launch scale (a few thousand cache entries).
+        The Limit parameter is NOT passed to Scan (DynamoDB applies Limit before
+        FilterExpression), so we paginate until we collect *limit* items.
         """
-        resp = self._client.scan(
-            TableName=self._table_name,
-            FilterExpression="begins_with(pk, :prefix)",
-            ExpressionAttributeValues={":prefix": {"S": "GAP#"}},
-            Limit=limit,
-        )
-        items = resp.get("Items", [])
         entries: list[dict] = []
-        for item in items:
-            entry: dict = {"question": item["question"]["S"]}
-            if "rewritten_query" in item:
-                entry["rewritten_query"] = item["rewritten_query"]["S"]
-            if "created_at" in item:
-                entry["created_at"] = item["created_at"]["S"]
-            entries.append(entry)
+        last_key: dict | None = None
+        while len(entries) < limit:
+            params: dict = {
+                "TableName": self._table_name,
+                "FilterExpression": "begins_with(pk, :prefix)",
+                "ExpressionAttributeValues": {":prefix": {"S": "GAP#"}},
+            }
+            if last_key:
+                params["ExclusiveStartKey"] = last_key
+            resp = self._client.scan(**params)
+            items = resp.get("Items", [])
+            for item in items:
+                entry: dict = {"question": item["question"]["S"]}
+                if "rewritten_query" in item:
+                    entry["rewritten_query"] = item["rewritten_query"]["S"]
+                if "created_at" in item:
+                    entry["created_at"] = item["created_at"]["S"]
+                entries.append(entry)
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
         entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
         return entries[:limit]

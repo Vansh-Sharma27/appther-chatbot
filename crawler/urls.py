@@ -59,6 +59,11 @@ def is_internal(url: str, base: str = BASE_URL, allow_subdomains: bool = True) -
     domain is treated as internal (e.g. ``blog.appther.com`` is internal to
     ``www.appther.com``). This ensures blog content hosted on a separate
     subdomain is crawled.
+
+    Uses tldextract when available for correct multi-label public suffix
+    handling (e.g. ``.co.uk``, ``.com.au``). Falls back to the last two
+    DNS labels when tldextract is not installed (correct for ``.com`` TLDs
+    like appther.com).
     """
     base_host = urlparse(base).netloc.lower()
     url_parsed = urlparse(url)
@@ -70,13 +75,21 @@ def is_internal(url: str, base: str = BASE_URL, allow_subdomains: bool = True) -
     if not allow_subdomains:
         return url_host == base_host
 
-    # Extract the registered domain (last two labels for standard TLDs).
-    # blog.appther.com and www.appther.com both share "appther.com".
+    try:
+        import tldextract
+
+        base_reg = tldextract.extract(base_host).registered_domain
+        url_reg = tldextract.extract(url_host).registered_domain
+        return bool(base_reg and url_reg and url_reg == base_reg)
+    except ImportError:
+        pass
+
+    # Fallback: compare the last two DNS labels (correct for standard
+    # single-label TLDs like .com, .org, .net).
     base_parts = base_host.split(".")
     url_parts = url_host.split(".")
     if len(base_parts) < 2 or len(url_parts) < 2:
         return url_host == base_host
-    # Compare the last two labels (e.g. "appther" + "com")
     return url_parts[-2:] == base_parts[-2:]
 
 

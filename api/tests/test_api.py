@@ -96,6 +96,7 @@ def _make_mock_no_answer_query():
             model="gemini-2.5-flash-lite",
             rewritten_query=question,
             chunks_used=0,
+            is_decline=True,
         )
 
     return mock_query

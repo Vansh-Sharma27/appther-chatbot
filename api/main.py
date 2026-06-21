@@ -145,6 +145,8 @@ async def get_rag_query_fn():
     """Return the RAG query callable.
 
     Override this in tests to avoid requiring an index or API keys.
+    The returned callable accepts the same keyword arguments as
+    api.rag.query() — including rewritten_query for cache-key correctness.
     """
     return rag_query
 
@@ -161,24 +163,31 @@ def _sse(event: str, data: object) -> str:
 
 
 def _word_tokens(text: str) -> list[str]:
-    """Split *text* into word-grouped tokens so the client sees progressive text.
+    """Split *text* into word-grouped tokens preserving newlines/markdown.
 
-    Groups 1-2 words per token for natural-feeling streaming. A full sentence
-    arrives as ~5-10 tokens rather than one big chunk or single characters.
+    Groups 1-2 words per token for natural-feeling streaming. Line breaks
+    are preserved as separate "\\n" tokens so the client receives the correct
+    structure (Sources list, markdown formatting, etc.).
     """
-    words = text.split()
-    if not words:
-        return [text]
+    lines = text.splitlines(keepends=True)
     tokens: list[str] = []
-    i = 0
-    while i < len(words):
-        chunk = words[i]
-        if i + 1 < len(words) and len(chunk) + len(words[i + 1]) + 1 < 40:
-            chunk += " " + words[i + 1]
-            i += 2
-        else:
-            i += 1
-        tokens.append(chunk + " ")
+    for line in lines:
+        if line.strip() == "":
+            tokens.append("\n")
+            continue
+        if line == "\n":
+            tokens.append("\n")
+            continue
+        words = line.split()
+        i = 0
+        while i < len(words):
+            chunk = words[i]
+            if i + 1 < len(words) and len(chunk) + len(words[i + 1]) + 1 < 40:
+                chunk += " " + words[i + 1]
+                i += 2
+            else:
+                i += 1
+            tokens.append(chunk + " ")
     if tokens:
         tokens[-1] = tokens[-1].rstrip()
     return tokens
@@ -229,12 +238,20 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_CORS_ORIGINS,
-        allow_credentials=True,
+        allow_credentials=False,  # widget is cookieless; credentials=False avoids
+        # the latent footgun where allow_origins=["*"] with credentials=True
+        # would reject all cross-origin responses in the browser.
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Content-Type", "X-API-Key"],
     )
 
     # ── Rate limiting ───────────────────────────────────────────────────────
+    # NOTE: slowapi in-memory storage is process-local, NOT shared across
+    # Lambda execution environments. In production, rate limiting is enforced
+    # at the WAF level (CloudFront + AWS WAF rate-based rules). The app-level
+    # limiter provides a coarse guard during local dev only. TODO: wire a
+    # shared Redis/DynamoDB-backed store for production if WAF-level enforcement
+    # is insufficient.
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -260,8 +277,15 @@ def create_app() -> FastAPI:
         history = [Turn(t.role, t.content) for t in body.history]  # type: ignore[arg-type]
 
         async def _stream() -> AsyncGenerator[str, None]:
-            # 1. Check cache
-            cached = cache.get(question)
+            # 1. Rewrite to standalone question first (needed for cache key)
+            from api.rag.rewrite import rewrite_query
+
+            g_key = os.environ.get("GEMINI_API_KEY", "")
+            rewritten = rewrite_query(question, history, api_key=g_key)
+
+            # 2. Check cache using the REWRITTEN query so follow-ups like
+            #    "how much does it cost?" resolve correctly per conversation context.
+            cached = cache.get(rewritten)
             if cached is not None:
                 answer = cached.get("answer", "")
                 sources = cached.get("sources", [])
@@ -274,11 +298,13 @@ def create_app() -> FastAPI:
                 yield _sse("done", {"model": model, "chunks_used": chunks_used})
                 return
 
-            # 2. Run the RAG pipeline (retrieves buffered RAGResult)
+            # 3. Run the RAG pipeline with pre-rewritten query so the pipeline
+            #    doesn't rewrite again.
             try:
                 result = await query_fn(
                     question=question,
                     history=history,
+                    rewritten_query=rewritten,
                 )
             except Exception:
                 logger.exception("RAG query failed")
@@ -290,8 +316,9 @@ def create_app() -> FastAPI:
             model = result.model
             chunks_used = result.chunks_used
 
-            # 3. No-answer routing: log content gap and suggest contact-us
-            if _is_no_answer(answer):
+            # 4. No-answer routing: use structured is_decline signal from RAG
+            #    result (language-independent) over the brittle English substring check.
+            if result.is_decline:
                 gap_log.log(question=question, rewritten_query=result.rewritten_query)
                 for token in _word_tokens(answer):
                     yield _sse("answer", {"token": token})
@@ -302,10 +329,11 @@ def create_app() -> FastAPI:
                     {"message": "Would you like us to reach out? Provide your details below."},
                 )
             else:
-                # 4. Cache the successful answer for future hits
+                # 5. Cache the successful answer under the REWRITTEN query so
+                #    future identical follow-ups produce a cache hit.
                 try:
                     cache.set(
-                        question,
+                        rewritten,
                         {
                             "answer": answer,
                             "sources": sources,
@@ -318,7 +346,7 @@ def create_app() -> FastAPI:
                 except Exception:
                     logger.warning("Failed to cache answer", exc_info=True)
 
-                # 5. Stream answer in word-sized tokens
+                # 6. Stream answer in word-sized tokens
                 for token in _word_tokens(answer):
                     yield _sse("answer", {"token": token})
                     await asyncio.sleep(0.015)
@@ -386,17 +414,15 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+# Lambda handler via Mangum (ASGI adapter).
+# NOTE: Mangum collects the full ASGI response body and returns it as a single
+# Lambda payload, so the carefully chunked SSE tokens are NOT streamed
+# incrementally in production — the client waits for the full response then
+# receives it all at once. True streaming on Lambda Python requires:
+#   - Lambda Function URL with InvokeMode=RESPONSE_STREAM
+#   - A custom runtime or Lambda Web Adapter
+# This is a known limitation; the streaming UX is accurate during local dev
+# (uvicorn) and the code is structured for streaming readiness. See the
+# graduation path in the architecture doc for the RESPONSE_STREAM upgrade.
 handler = Mangum(app)
-
-
-# ── No-answer detection ──────────────────────────────────────────────────────
-
-
-def _is_no_answer(answer: str) -> bool:
-    """Return True when the answer is a decline message, not a real answer."""
-    lowered = answer.lower().strip()
-    return (
-        "don't have information" in lowered
-        or "i don't have" in lowered
-        or "no relevant context" in lowered
-    )

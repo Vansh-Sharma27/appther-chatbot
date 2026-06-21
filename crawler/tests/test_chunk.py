@@ -230,7 +230,8 @@ class TestChunkFaqPairs:
             assert c.url == "https://www.appther.com/faq"
             assert c.title == "FAQ"
             assert c.page_type == "faq"
-            assert c.content_hash == "testhash"
+            assert c.content_hash and len(c.content_hash) == 64  # SHA-256 hex digest
+            assert int(c.content_hash, 16)  # valid hex
             assert c.chunk_id
 
     def test_empty_pairs_returns_empty(self):

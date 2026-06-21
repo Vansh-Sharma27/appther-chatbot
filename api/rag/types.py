@@ -42,3 +42,4 @@ class RAGResult:
     model: str
     rewritten_query: str
     chunks_used: int
+    is_decline: bool = False

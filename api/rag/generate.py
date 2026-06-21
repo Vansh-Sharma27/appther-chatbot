@@ -33,6 +33,14 @@ from langdetect import detect
 from api.rag.prompt import SYSTEM_PROMPT, build_user_message, format_context, format_history
 from api.rag.types import RetrievedChunk, Turn
 
+__all__ = [
+    "generate_answer",
+    "should_escalate",
+    "detect_language",
+    "resolve_model",
+    "NO_CONTEXT_REPLY",
+]
+
 logger = logging.getLogger(__name__)
 
 # ── Model configuration ───────────────────────────────────────────────────────

@@ -142,14 +142,14 @@ def mmr_select(
     if len(chunks) <= k:
         return list(chunks)
 
-    # Pre-compute relevance scores (cosine sim to query) for each chunk.
-    # If the chunk has no vector, fall back to the RRF score as relevance.
+    # Use the reranker score (cross-encoder relevance) as the primary relevance
+    # signal — this is the single biggest quality lever. Bi-encoder cosine
+    # similarity is only used for the diversity/redundancy term (pairwise
+    # chunk-to-chunk similarity). When rerank scores are absent (e.g. fallback),
+    # they default to the RRF score from retrieval.
     relevance: dict[str, float] = {}
     for c in chunks:
-        if c.vector:
-            relevance[c.chunk_id] = _cosine_sim(c.vector, query_vector)
-        else:
-            relevance[c.chunk_id] = c.score
+        relevance[c.chunk_id] = c.score if c.score > 0.0 else _cosine_sim(c.vector, query_vector)
 
     selected: list[RetrievedChunk] = []
     remaining = list(chunks)

@@ -8,6 +8,7 @@ import type {
 
 export interface ChatClientOptions {
   baseUrl: string;
+  apiKey?: string;
 }
 
 export interface ChatCallbacks {
@@ -58,8 +59,11 @@ function parseSSEBuffer(buffer: string): {
 }
 
 export function createChatClient(options: ChatClientOptions) {
-  const { baseUrl } = options;
-  const headers = { "Content-Type": "application/json" };
+  const { baseUrl, apiKey } = options;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(apiKey ? { "X-API-Key": apiKey } : {}),
+  };
 
   async function health(): Promise<HealthResponse> {
     const res = await fetch(`${baseUrl}/health`);

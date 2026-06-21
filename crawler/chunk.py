@@ -247,7 +247,7 @@ def chunk_faq_pairs(
     url: str,
     title: str,
     page_type: str,
-    content_hash: str,
+    content_hash: str,  # kept for interface compatibility but per-chunk hash is used
     source: str,
     start_index: int = 0,
 ) -> list[Chunk]:
@@ -256,13 +256,14 @@ def chunk_faq_pairs(
     for i, pair in enumerate(faq_pairs):
         text = pair.to_text()
         idx = start_index + i
+        pair_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         chunks.append(
             Chunk(
                 chunk_id=_make_chunk_id(url, idx, text),
                 url=url,
                 title=title,
                 page_type=page_type,
-                content_hash=content_hash,
+                content_hash=pair_hash,
                 text=text,
                 chunk_index=idx,
                 source=source,
@@ -313,13 +314,14 @@ def chunk_document(doc: NormalizedDoc) -> list[Chunk]:
             for piece in _split_section(section):
                 if not piece.strip():
                     continue
+                piece_hash = hashlib.sha256(piece.encode("utf-8")).hexdigest()
                 chunks.append(
                     Chunk(
                         chunk_id=_make_chunk_id(doc.url, idx, piece),
                         url=doc.url,
                         title=doc.title,
                         page_type=doc.page_type,
-                        content_hash=doc.content_hash,
+                        content_hash=piece_hash,
                         text=piece,
                         chunk_index=idx,
                         source=doc.source,
