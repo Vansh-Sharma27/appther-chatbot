@@ -1,7 +1,7 @@
 """RAG query core — public API for the Step 5 library.
 
 The query() function orchestrates all pipeline stages:
-  rewrite → embed → hybrid retrieve → rerank → MMR → generate
+  rewrite -> embed -> hybrid retrieve -> rerank -> MMR -> generate
 
 All stages are independently testable. This module is the integration point
 for Step 6 (FastAPI Lambda endpoint).
@@ -20,7 +20,7 @@ import logging
 import os
 
 from api.rag.embed import embed_query, provider_from_index_meta
-from api.rag.generate import detect_language, generate_answer
+from api.rag.generate import detect_language, generate_answer, resolve_model
 from api.rag.prompt import MAX_QUESTION_CHARS
 from api.rag.rerank import voyage_rerank
 from api.rag.retrieve import hybrid_retrieve, mmr_select
@@ -66,9 +66,9 @@ async def query(
 
     # 1. Rewrite
     rewritten = rewrite_query(question, history, api_key=g_key)
-    logger.debug("Query rewritten: %r → %r", question, rewritten)
+    logger.debug("Query rewritten: %r => %r", question, rewritten)
 
-    # 2. Embed — resolve provider from index metadata so query model matches ingest
+    # 2. Embed -- resolve provider from index metadata so query model matches ingest
     import lancedb
 
     db = lancedb.connect(uri)
@@ -80,10 +80,10 @@ async def query(
     candidates = hybrid_retrieve(query_vec, rewritten, tbl, top_k=top_k_retrieve)
     logger.debug("Retrieved %d candidates", len(candidates))
 
-    # 4. Rerank — keep a wider band so MMR has room to diversify
+    # 4. Rerank -- keep a wider band so MMR has room to diversify
     reranked = voyage_rerank(rewritten, candidates, top_n=top_n_rerank, api_key=v_key)
 
-    # 5. MMR diversification — trim to the final diverse set
+    # 5. MMR diversification -- trim to the final diverse set
     diverse = mmr_select(reranked, query_vec, k=top_n_final)
     logger.debug("After MMR: %d chunks", len(diverse))
 
@@ -95,10 +95,7 @@ async def query(
 
     sources = list(dict.fromkeys(c.url for c in diverse))
     language = detect_language(question)
-
-    from api.rag.generate import GEMINI_FLASH_MODEL, GEMINI_LITE_MODEL, should_escalate
-
-    model_used = GEMINI_FLASH_MODEL if should_escalate(question) else GEMINI_LITE_MODEL
+    model_used = resolve_model(question, diverse)
 
     return RAGResult(
         answer=answer,
