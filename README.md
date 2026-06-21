@@ -11,9 +11,11 @@
 crawler/    ingestion pipeline (discovery, fetch, clean, chunk, embed, index)
 api/        FastAPI RAG endpoint + streaming Lambda handler
             ├── main.py          FastAPI app, streaming /chat, /feedback, /lead, /health
+            │                    Security: X-API-Key auth (optional), slowapi rate limiting,
+            │                    CORS origin whitelist, CSP/HSTS/XFO security headers
             ├── state.py         DynamoDB-backed answer cache, feedback, leads, content-gap log
             └── rag/             RAG query core (rewrite, embed, retrieve, rerank, generate)
-widget/     embeddable React chat widget (Step 7 — coming next)
+widget/     embeddable React chat widget (Step 7 — bundled as dist/widget.js, 44 kB)
 infra/      Terraform (S3, DynamoDB, Lambda, CloudFront, WAF, ECR, Secrets)
 eval/       golden Q&A set + RAGAS harness + jailbreak probes (Step 10)
 plans/      implementation notes and ADRs
@@ -60,7 +62,7 @@ terraform validate
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[crawler,embed,api,dev]"
 pre-commit install
-pytest -q   # 457+ tests across crawler (Steps 1–4) and api (Steps 5–6)
+pytest -q   # 462+ tests across crawler (Steps 1–4) and api (Steps 5–6)
 ```
 
 ### Running the API locally
@@ -69,6 +71,11 @@ pytest -q   # 457+ tests across crawler (Steps 1–4) and api (Steps 5–6)
 # Requires VOYAGE_API_KEY, GEMINI_API_KEY, and a built LanceDB index
 export LANCE_INDEX_URI=./lance_index
 export DYNAMODB_TABLE=appther-chatbot-main
+# API key auth is disabled when API_AUTH_KEY is empty (dev mode).
+# Set a key to enable:
+# export API_AUTH_KEY=your-secret-key
+# Rate limiting is set via RATE_LIMIT (default: 10/minute). Set to "1000/minute" to relax in dev:
+# export RATE_LIMIT=1000/minute
 uvicorn api.main:app --reload --port 8000
 ```
 
@@ -77,6 +84,7 @@ Then:
 ```bash
 curl -N http://localhost:8000/chat \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
   -d '{"question": "What does Appther do?"}'
 ```
 
@@ -129,7 +137,7 @@ The workflow uses GitHub OIDC to assume the crawler IAM role (`AWS_CRAWLER_ROLE_
 | 4 | ✅ | Crawl verification & refresh scheduling |
 | 5 | ✅ | RAG query core (rewrite, retrieve, rerank, generate) |
 | 6 | ✅ | **FastAPI Lambda endpoint + guardrails & state** |
-| 7 | ⬜ | Embeddable React chat widget |
+| 7 | ✅ | Embeddable React chat widget |
 | 8 | ⬜ | Deployment & edge security (CloudFront + WAF) |
 | 9 | ⬜ | Observability & cost controls |
 | 10 | ⬜ | Evaluation & hardening gate |
