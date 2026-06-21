@@ -35,6 +35,14 @@ resource "aws_iam_role_policy" "lambda_app" {
         ]
       },
       {
+        Sid    = "S3IndexWrite"
+        Effect = "Allow"
+        Action = ["s3:PutObject", "s3:DeleteObject"]
+        Resource = [
+          "${aws_s3_bucket.index.arn}/*",
+        ]
+      },
+      {
         Sid    = "DynamoDB"
         Effect = "Allow"
         Action = [
@@ -122,6 +130,26 @@ resource "aws_iam_role_policy" "crawler_app" {
           aws_s3_bucket.index.arn,
           "${aws_s3_bucket.index.arn}/*",
         ]
+      },
+      {
+        Sid    = "S3WidgetWrite"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+        ]
+        Resource = [
+          aws_s3_bucket.widget_static.arn,
+          "${aws_s3_bucket.widget_static.arn}/*",
+        ]
+      },
+      {
+        Sid      = "CloudFrontInvalidation"
+        Effect   = "Allow"
+        Action   = ["cloudfront:CreateInvalidation"]
+        Resource = ["*"]
       },
       {
         Sid    = "SecretsRead"

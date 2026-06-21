@@ -40,7 +40,13 @@ from slowapi.util import get_remote_address
 
 from api.rag import query as rag_query
 from api.rag.types import Turn
+from api.secrets import inject_env as _inject_secrets
 from api.state import AnswerCache, ContentGapLog, FeedbackStore, LeadStore
+
+# Resolve API keys from Secrets Manager at cold start. This runs once per
+# execution environment lifetime — subsequent warm invocations reuse the
+# cached secrets with zero additional latency.
+_inject_secrets()
 
 logger = logging.getLogger(__name__)
 

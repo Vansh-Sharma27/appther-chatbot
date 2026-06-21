@@ -1,0 +1,14 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.git
+.gitignore
+README.md
+plans
+eval
+widget
+infra
+*.egg-info
+.DS_Store
