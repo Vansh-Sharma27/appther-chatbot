@@ -48,11 +48,6 @@ output "voyage_secret_arn" {
   description = "Secrets Manager ARN for the Voyage API key"
 }
 
-output "gemini_secret_arn" {
-  value       = aws_secretsmanager_secret.gemini_api_key.arn
-  description = "Secrets Manager ARN for the Gemini API key"
-}
-
 output "cloudfront_domain" {
   value       = aws_cloudfront_distribution.main.domain_name
   description = "CloudFront distribution domain name (public endpoint)"

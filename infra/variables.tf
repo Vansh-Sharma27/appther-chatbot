@@ -47,7 +47,7 @@ variable "api_image_tag" {
 }
 
 variable "api_lambda_timeout" {
-  description = "Lambda function timeout in seconds (30s Gemini timeout + cold start + retrieval)"
+  description = "Lambda function timeout in seconds (Bedrock generation timeout + cold start + retrieval)"
   type        = number
   default     = 120
 }

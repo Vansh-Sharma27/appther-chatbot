@@ -286,8 +286,7 @@ def create_app() -> FastAPI:
             # 1. Rewrite to standalone question first (needed for cache key)
             from api.rag.rewrite import rewrite_query
 
-            g_key = os.environ.get("GEMINI_API_KEY", "")
-            rewritten = rewrite_query(question, history, api_key=g_key)
+            rewritten = rewrite_query(question, history)
 
             # 2. Check cache using the REWRITTEN query so follow-ups like
             #    "how much does it cost?" resolve correctly per conversation context.

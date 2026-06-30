@@ -2,7 +2,6 @@
 
 Environment variables expected:
   SECRET_VOYAGE_ARN  — ARN of the Voyage AI API key secret
-  SECRET_GEMINI_ARN  — ARN of the Gemini API key secret
   SECRET_JINA_ARN    — ARN of the Jina AI API key secret (optional)
 
 At module-load time (cold start), all secrets are fetched once and cached in
@@ -57,20 +56,26 @@ def get_secrets() -> dict[str, str]:
     if _SECRETS_CACHE is not None:
         return _SECRETS_CACHE
 
-    client = boto3.client("secretsmanager", region_name="us-east-1")
-
     voyage_arn = os.environ.get("SECRET_VOYAGE_ARN", "")
-    gemini_arn = os.environ.get("SECRET_GEMINI_ARN", "")
     jina_arn = os.environ.get("SECRET_JINA_ARN", "")
 
+    # No ARNs configured (dev/test mode) — skip Secrets Manager entirely.
+    if not voyage_arn and not jina_arn:
+        _SECRETS_CACHE = {
+            "VOYAGE_API_KEY": os.environ.get("VOYAGE_API_KEY", ""),
+            "JINA_API_KEY": os.environ.get("JINA_API_KEY", ""),
+        }
+        logger.info("No secret ARNs configured — using env var fallbacks")
+        return _SECRETS_CACHE
+
+    client = boto3.client("secretsmanager", region_name="us-east-1")
+
     voyage_key = _resolve_secret(voyage_arn, client)
-    gemini_key = _resolve_secret(gemini_arn, client)
     jina_key = _resolve_secret(jina_arn, client)
 
     # Fallback to env vars if secret resolution failed (dev/local mode)
     _SECRETS_CACHE = {
         "VOYAGE_API_KEY": voyage_key or os.environ.get("VOYAGE_API_KEY", ""),
-        "GEMINI_API_KEY": gemini_key or os.environ.get("GEMINI_API_KEY", ""),
         "JINA_API_KEY": jina_key or os.environ.get("JINA_API_KEY", ""),
     }
 

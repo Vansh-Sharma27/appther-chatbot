@@ -5,7 +5,7 @@ COPY pyproject.toml uv.lock ./
 COPY crawler/ ./crawler/
 COPY api/ ./api/
 
-RUN pip install --no-cache-dir -e ".[api]" && \
+RUN pip install --no-cache-dir -e ".[api,crawler,embed]" && \
     rm -rf /root/.cache/pip
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
@@ -28,4 +28,4 @@ ENV READINESS_CHECK_PATH=/health
 
 EXPOSE 8080
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]

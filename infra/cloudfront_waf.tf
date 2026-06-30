@@ -171,7 +171,7 @@ resource "aws_cloudfront_distribution" "main" {
 
   # ── API origin: Lambda Function URL ───────────────────────────────────────
   origin {
-    domain_name = replace(aws_lambda_function_url.api.function_url, "https://", "")
+    domain_name = trimsuffix(replace(aws_lambda_function_url.api.function_url, "https://", ""), "/")
     origin_id   = "api"
 
     custom_origin_config {
@@ -179,6 +179,9 @@ resource "aws_cloudfront_distribution" "main" {
       https_port             = 443
       origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
+      # Match the Lambda timeout (120s) so CloudFront doesn't 504 before
+      # the Lambda finishes a cold-start + RAG query on the first request.
+      origin_read_timeout = 120
     }
 
     # No Origin Shield — AWS charges $0.001/GB through it, and the Lambda

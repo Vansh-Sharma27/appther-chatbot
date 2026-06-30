@@ -64,8 +64,19 @@ resource "aws_iam_role_policy" "lambda_app" {
         Action = ["secretsmanager:GetSecretValue"]
         Resource = [
           aws_secretsmanager_secret.voyage_api_key.arn,
-          aws_secretsmanager_secret.gemini_api_key.arn,
           aws_secretsmanager_secret.jina_api_key.arn,
+        ]
+      },
+      {
+        Sid    = "BedrockInvoke"
+        Effect = "Allow"
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+        ]
+        Resource = [
+          "arn:aws:bedrock:${var.region}::foundation-model/*",
+          "arn:aws:bedrock:${var.region}:*:inference-profile/*",
         ]
       },
     ]

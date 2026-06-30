@@ -8,13 +8,13 @@ Design decisions:
 - Only rewrite when there is prior history AND the question contains context-
   dependent pronouns. This avoids an API call for the common case where the
   question is already standalone.
-- Gemini Flash-Lite is used for rewrites (cheap, fast, no reasoning needed).
+- Bedrock Nova Lite is used for rewrites (IAM auth, no API key, cheap and fast).
 - If the API call fails for any reason, the original question is returned
   unchanged so the pipeline continues gracefully.
 
 Public API:
-    rewrite_query(question, history, api_key) → str
-    _gemini_rewrite(question, history, api_key) → str   (internal, mockable in tests)
+    rewrite_query(question, history) → str
+    _bedrock_rewrite(question, history) → str   (internal, mockable in tests)
 """
 
 from __future__ import annotations
@@ -84,21 +84,36 @@ def _needs_rewrite(question: str) -> bool:
     q_stripped = question.strip()
     first_word = q_stripped.split()[0].strip("?.!,").lower() if q_stripped.split() else ""
     standalone_starters = {
-        "what", "why", "how", "when", "where", "who", "which",
-        "can", "does", "do", "is", "are", "will", "would", "could",
-        "should", "did", "has", "have", "tell", "explain", "describe",
+        "what",
+        "why",
+        "how",
+        "when",
+        "where",
+        "who",
+        "which",
+        "can",
+        "does",
+        "do",
+        "is",
+        "are",
+        "will",
+        "would",
+        "could",
+        "should",
+        "did",
+        "has",
+        "have",
+        "tell",
+        "explain",
+        "describe",
     }
     word_count = len(q_stripped.split())
-    if first_word in standalone_starters and word_count >= 4:
-        return False
-
-    return True
+    return not (first_word in standalone_starters and word_count >= 4)
 
 
 def rewrite_query(
     question: str,
     history: list[Turn],
-    api_key: str | None = None,
 ) -> str:
     """Return a standalone version of *question* given *history*.
 
@@ -109,24 +124,31 @@ def rewrite_query(
         return question[:MAX_QUESTION_CHARS]
 
     try:
-        return _gemini_rewrite(question, history, api_key=api_key)[:MAX_QUESTION_CHARS]
+        return _bedrock_rewrite(question, history)[:MAX_QUESTION_CHARS]
     except Exception as exc:  # noqa: BLE001
         logger.warning("Query rewrite failed — using original question: %s", exc)
         return question[:MAX_QUESTION_CHARS]
 
 
-def _gemini_rewrite(
+def _bedrock_rewrite(
     question: str,
     history: list[Turn],
-    api_key: str | None = None,
 ) -> str:
-    """Call Gemini Flash-Lite to rewrite the question as a standalone query."""
-    from google import genai
-    from google.genai import types as genai_types
+    """Call Bedrock Converse (Nova Lite) to rewrite the question as a standalone query."""
+    import boto3
+    import botocore.config
 
-    key = api_key or os.environ.get("GEMINI_API_KEY", "")
-    timeout = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "30")) or 30.0
-    client = genai.Client(api_key=key, http_options={"timeout": timeout * 1000})
+    region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+    model = os.getenv("PRIMARY_MODEL", "us.amazon.nova-lite-v1:0")
+    timeout = float(os.getenv("BEDROCK_TIMEOUT_SECONDS", "30")) or 30.0
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=region,
+        config=botocore.config.Config(
+            read_timeout=int(timeout) + 5,
+            connect_timeout=5,
+        ),
+    )
 
     recent = history[-_MAX_HISTORY_TURNS:]
     conv_lines = []
@@ -144,13 +166,10 @@ def _gemini_rewrite(
         "Standalone question:"
     )
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            temperature=0.0,
-            max_output_tokens=128,
-        ),
+    response = client.converse(
+        modelId=model,
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": 128, "temperature": 0.0},
     )
-    rewritten = response.text.strip()
+    rewritten = response["output"]["message"]["content"][0]["text"].strip()
     return rewritten if rewritten else question

@@ -59,17 +59,16 @@ resource "aws_lambda_function" "api" {
 
   environment {
     variables = {
-      DYNAMODB_TABLE         = aws_dynamodb_table.main.name
-      SECRET_VOYAGE_ARN      = aws_secretsmanager_secret.voyage_api_key.arn
-      SECRET_GEMINI_ARN      = aws_secretsmanager_secret.gemini_api_key.arn
-      SECRET_JINA_ARN        = aws_secretsmanager_secret.jina_api_key.arn
-      LANCE_INDEX_URI        = "s3://${aws_s3_bucket.index.bucket}/lance_db"
-      CORS_ORIGINS           = "https://www.appther.com,https://appther.com"
-      RATE_LIMIT             = "20/minute"
-      GEMINI_LITE_MODEL      = "gemini-2.5-flash-lite"
-      GEMINI_FLASH_MODEL     = "gemini-3-flash"
-      GEMINI_TIMEOUT_SECONDS = "30"
-      AWS_LWA_INVOKE_MODE    = "response_stream"
+      DYNAMODB_TABLE          = aws_dynamodb_table.main.name
+      SECRET_VOYAGE_ARN       = aws_secretsmanager_secret.voyage_api_key.arn
+      SECRET_JINA_ARN         = aws_secretsmanager_secret.jina_api_key.arn
+      LANCE_INDEX_URI         = "s3://${aws_s3_bucket.index.bucket}/lance_db"
+      CORS_ORIGINS            = "https://www.appther.com,https://appther.com"
+      RATE_LIMIT              = "20/minute"
+      PRIMARY_MODEL           = "us.amazon.nova-lite-v1:0"
+      ESCALATION_MODEL        = "us.nvidia.nemotron-3-super-120b-v1:0"
+      BEDROCK_TIMEOUT_SECONDS = "30"
+      AWS_LWA_INVOKE_MODE     = "response_stream"
     }
   }
 
@@ -90,4 +89,15 @@ resource "aws_lambda_function_url" "api" {
     allow_headers     = ["Content-Type", "X-API-Key"]
     max_age           = 3600
   }
+}
+
+# Since October 2025, AWS requires BOTH lambda:InvokeFunctionUrl (created
+# automatically by the function URL resource above) AND lambda:InvokeFunction
+# in the resource-based policy for public (AuthType=NONE) Function URLs.
+# Without this second permission, the Function URL returns 403 AccessDenied.
+resource "aws_lambda_permission" "function_url_invoke" {
+  statement_id  = "InvokeFunctionPublic"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.api.function_name
+  principal     = "*"
 }

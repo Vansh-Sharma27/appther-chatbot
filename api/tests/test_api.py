@@ -73,7 +73,7 @@ def _make_mock_query(answer_text: str = "Appther offers ERP solutions."):
             answer=answer_text,
             sources=["https://www.appther.com/services/erp"],
             language="en",
-            model="gemini-2.5-flash-lite",
+            model="us.amazon.nova-lite-v1:0",
             rewritten_query=question,
             chunks_used=4,
         )
@@ -93,7 +93,7 @@ def _make_mock_no_answer_query():
             ),
             sources=[],
             language="en",
-            model="gemini-2.5-flash-lite",
+            model="us.amazon.nova-lite-v1:0",
             rewritten_query=question,
             chunks_used=0,
             is_decline=True,
@@ -218,7 +218,7 @@ class TestChat:
             "answer": "Cached answer about ERP.",
             "sources": ["https://www.appther.com/faq"],
             "language": "en",
-            "model": "gemini-2.5-flash-lite",
+            "model": "us.amazon.nova-lite-v1:0",
             "rewritten_query": "What is ERP?",
             "chunks_used": 3,
         }

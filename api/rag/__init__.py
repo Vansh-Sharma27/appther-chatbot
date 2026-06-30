@@ -39,7 +39,6 @@ async def query(
     index_uri: str | None = None,
     table_name: str = LANCE_TABLE_NAME,
     voyage_api_key: str | None = None,
-    gemini_api_key: str | None = None,
     top_k_retrieve: int = 20,
     top_n_rerank: int = 12,
     top_n_final: int = 6,
@@ -56,7 +55,7 @@ async def query(
       4. Rerank with Voyage rerank-2.5, keep top_n_rerank.
       5. Page-type boost applied to rerank scores.
       6. MMR diversification on the boosted reranked set.
-      7. Generate answer with Gemini (model tiered by complexity).
+      7. Generate answer with Bedrock (model tiered by complexity).
 
     *original_question* is the user's actual phrasing; when provided, it is
     used for language detection and escalation decisions instead of the
@@ -65,10 +64,8 @@ async def query(
     history = history or []
     uri = index_uri or os.environ.get("LANCE_INDEX_URI", "./lance_index")
     v_key = voyage_api_key or os.environ.get("VOYAGE_API_KEY")
-    g_key = gemini_api_key or os.environ.get("GEMINI_API_KEY")
 
     q_for_generation = original_question or question
-    q_for_retrieval = rewritten_query or question
 
     # Guard: reject or truncate oversized questions before any paid API call
     if len(question) > MAX_QUESTION_CHARS:
@@ -76,10 +73,7 @@ async def query(
         question = question[:MAX_QUESTION_CHARS]
 
     # 1. Rewrite (only if the caller hasn't already done it)
-    if rewritten_query is None:
-        rewritten = rewrite_query(question, history, api_key=g_key)
-    else:
-        rewritten = rewritten_query
+    rewritten = rewrite_query(question, history) if rewritten_query is None else rewritten_query
     logger.debug("Query rewritten: %r => %r", question, rewritten)
 
     # 2. Embed + retrieve (with Jina failover)
@@ -88,9 +82,7 @@ async def query(
     query_vec = None
     candidates = None
     provider = None
-    table = None
     db = None
-    used_jina = False
 
     try:
         # Build storage_options for S3 URIs (Bug 17 fix)
@@ -110,11 +102,14 @@ async def query(
         logger.warning("Primary (Voyage) path failed, trying Jina standby: %s", primary_exc)
         try:
             jina_table = LANCE_JINA_TABLE_NAME
-            jina_tbl = db.open_table(jina_table) if db else lancedb.connect(uri, storage_options=storage_opts).open_table(jina_table)
+            jina_tbl = (
+                db.open_table(jina_table)
+                if db
+                else lancedb.connect(uri, storage_options=storage_opts).open_table(jina_table)
+            )
             jina_provider = provider_from_index_meta(uri, jina_table, api_key=v_key)
             query_vec = embed_query(rewritten, provider=jina_provider)
             candidates = hybrid_retrieve(query_vec, rewritten, jina_tbl, top_k=top_k_retrieve)
-            used_jina = True
             logger.info("Jina standby path succeeded for query")
         except Exception as jina_exc:
             logger.error("Both Voyage and Jina paths failed: %s / %s", primary_exc, jina_exc)
@@ -153,7 +148,7 @@ async def query(
         is_decline = True
     else:
         answer_parts: list[str] = []
-        async for token in generate_answer(q_for_generation, diverse, history, api_key=g_key):
+        async for token in generate_answer(q_for_generation, diverse, history):
             answer_parts.append(token)
         answer = "".join(answer_parts)
         sources = list(dict.fromkeys(c.url for c in diverse))
@@ -163,7 +158,10 @@ async def query(
         is_decline = (
             len(diverse) == 0
             or answer.startswith(NO_CONTEXT_REPLY[:30])
-            or ("don't have information" in answer.lower() and len(answer) < len(NO_CONTEXT_REPLY) + 50)
+            or (
+                "don't have information" in answer.lower()
+                and len(answer) < len(NO_CONTEXT_REPLY) + 50
+            )
         )
 
     return RAGResult(

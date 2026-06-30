@@ -111,7 +111,7 @@ def test_rewrite_pronoun_reference_triggers_rewrite(mocker):
     q = "How much does it cost?"
 
     mock_generate = mocker.patch(
-        "api.rag.rewrite._gemini_rewrite",
+        "api.rag.rewrite._bedrock_rewrite",
         return_value="How much does Odoo implementation cost?",
     )
     result = rewrite_query(q, history=history)
@@ -120,11 +120,11 @@ def test_rewrite_pronoun_reference_triggers_rewrite(mocker):
     assert result == "How much does Odoo implementation cost?"
 
 
-def test_rewrite_returns_original_on_gemini_failure(mocker):
-    """If Gemini fails during rewrite, return the original question."""
+def test_rewrite_returns_original_on_bedrock_failure(mocker):
+    """If Bedrock fails during rewrite, return the original question."""
     history = make_history(("Tell me about that feature.", "It is very useful."))
     q = "How does it work?"
-    mocker.patch("api.rag.rewrite._gemini_rewrite", side_effect=Exception("API timeout"))
+    mocker.patch("api.rag.rewrite._bedrock_rewrite", side_effect=Exception("API timeout"))
     result = rewrite_query(q, history=history)
     assert result == q
 
@@ -152,11 +152,13 @@ def test_format_context_numbered():
     assert "[3]" in result
 
 
-def test_format_history_converts_assistant_to_model():
+def test_format_history_uses_bedrock_roles():
     history = [Turn("user", "Hello"), Turn("assistant", "Hi there")]
     result = format_history(history)
     assert result[0]["role"] == "user"
-    assert result[1]["role"] == "model"
+    assert result[0]["content"][0]["text"] == "Hello"
+    assert result[1]["role"] == "assistant"
+    assert result[1]["content"][0]["text"] == "Hi there"
 
 
 def test_format_history_caps_to_max_turns():
@@ -175,7 +177,7 @@ def test_question_length_guard_truncates():
     # rewrite_query should truncate
     from api.rag.rewrite import rewrite_query
 
-    result = rewrite_query(long_q, history=[], api_key="fake")
+    result = rewrite_query(long_q, history=[])
     assert len(result) <= MAX_QUESTION_CHARS
 
 
@@ -183,7 +185,7 @@ def test_question_length_guard_preserves_short():
     short_q = "What is ERP?"
     from api.rag.rewrite import rewrite_query
 
-    result = rewrite_query(short_q, history=[], api_key="fake")
+    result = rewrite_query(short_q, history=[])
     assert result == short_q
 
 
@@ -234,22 +236,20 @@ async def test_generate_declines_when_no_context():
             question="What is your pricing?",
             context_chunks=[],
             history=[],
-            api_key="fake",
         )
     )
     assert "contact" in result.lower() or "don't have" in result.lower()
 
 
 @pytest.mark.asyncio
-async def test_generate_does_not_call_gemini_when_no_context():
+async def test_generate_does_not_call_bedrock_when_no_context():
     """No context → decline immediately without an API call."""
-    with patch("api.rag.generate._call_gemini") as mock_call:
+    with patch("api.rag.generate._call_bedrock") as mock_call:
         result = await _collect(
             generate_answer(
                 question="What is pricing?",
                 context_chunks=[],
                 history=[],
-                api_key="fake",
             )
         )
     mock_call.assert_not_called()
@@ -257,71 +257,68 @@ async def test_generate_does_not_call_gemini_when_no_context():
 
 
 @pytest.mark.asyncio
-async def test_generate_calls_gemini_with_context(mocker):
-    """With context chunks, Gemini must be called."""
+async def test_generate_calls_bedrock_with_context(mocker):
+    """With context chunks, Bedrock must be called."""
     chunks = [make_chunk("c1", text="Appther pricing starts at $5000.")]
 
-    async def fake_gemini(*args, **kwargs):
+    async def fake_bedrock(*args, **kwargs):
         yield "Appther pricing starts at $5000 for basic ERP."
 
-    mocker.patch("api.rag.generate._call_gemini", side_effect=fake_gemini)
+    mocker.patch("api.rag.generate._call_bedrock", side_effect=fake_bedrock)
     result = await _collect(
         generate_answer(
             question="What is Appther pricing?",
             context_chunks=chunks,
             history=[],
-            api_key="fake",
         )
     )
     assert "5000" in result
 
 
 @pytest.mark.asyncio
-async def test_generate_uses_flash_lite_for_simple_query(mocker):
-    """Simple question → Flash-Lite model selected."""
+async def test_generate_uses_primary_model_for_simple_query(mocker):
+    """Simple question → PRIMARY_MODEL selected."""
     chunks = [make_chunk()]
     captured = {}
 
-    async def fake_gemini(question, context_str, history, model_name, api_key):
+    async def fake_bedrock(question, context_str, history, model_name):
         captured["model"] = model_name
         yield "answer"
 
-    mocker.patch("api.rag.generate._call_gemini", side_effect=fake_gemini)
+    mocker.patch("api.rag.generate._call_bedrock", side_effect=fake_bedrock)
     await _collect(
         generate_answer(
             question="What does Appther do?",
             context_chunks=chunks,
             history=[],
-            api_key="fake",
         )
     )
-    from api.rag.generate import GEMINI_LITE_MODEL
+    from api.rag.generate import PRIMARY_MODEL
 
-    assert captured["model"] == GEMINI_LITE_MODEL
+    assert captured["model"] == PRIMARY_MODEL
 
 
 @pytest.mark.asyncio
-async def test_generate_escalates_for_complex_query(mocker):
-    """Multi-part question → escalation model selected."""
+async def test_generate_escalates_to_escalation_model_for_complex_query(mocker):
+    """Multi-part question → ESCALATION_MODEL selected."""
     chunks = [make_chunk()]
     captured = {}
 
-    async def fake_gemini(question, context_str, history, model_name, api_key):
+    async def fake_bedrock(question, context_str, history, model_name):
         captured["model"] = model_name
         yield "answer"
 
-    mocker.patch("api.rag.generate._call_gemini", side_effect=fake_gemini)
+    mocker.patch("api.rag.generate._call_bedrock", side_effect=fake_bedrock)
     await _collect(
         generate_answer(
             question="Compare Odoo vs SAP and explain each one?",
             context_chunks=chunks,
             history=[],
-            api_key="fake",
         )
     )
-    from api.rag.generate import GEMINI_FLASH_MODEL
+    from api.rag.generate import ESCALATION_MODEL
 
-    assert captured["model"] == GEMINI_FLASH_MODEL
+    assert captured["model"] == ESCALATION_MODEL
 
 
 @pytest.mark.asyncio
@@ -330,13 +327,13 @@ async def test_generate_streams_incremental_chunks(mocker):
     chunks = [make_chunk()]
     tokens = ["Appther ", "offers ", "ERP ", "solutions."]
 
-    async def fake_gemini(*args, **kwargs):
+    async def fake_bedrock(*args, **kwargs):
         for t in tokens:
             yield t
 
-    mocker.patch("api.rag.generate._call_gemini", side_effect=fake_gemini)
+    mocker.patch("api.rag.generate._call_bedrock", side_effect=fake_bedrock)
     collected = []
-    async for token in generate_answer("What does Appther do?", chunks, [], "fake"):
+    async for token in generate_answer("What does Appther do?", chunks, []):
         collected.append(token)
 
     assert len(collected) == len(tokens)

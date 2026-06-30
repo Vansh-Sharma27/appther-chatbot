@@ -3,7 +3,7 @@
 Responsibilities:
 - SYSTEM_PROMPT: the fixed instruction block for the LLM.
 - format_context(): turn retrieved chunks into a numbered source block.
-- format_history(): convert Turn list to Gemini content dicts (role: user/model).
+- format_history(): convert Turn list to Bedrock Converse messages (role: user/assistant).
 - build_user_message(): compose the final user turn: context + question.
 """
 
@@ -62,16 +62,16 @@ def format_context(chunks: list[RetrievedChunk]) -> str:
 
 
 def format_history(history: list[Turn]) -> list[dict]:
-    """Convert the last MAX_HISTORY_TURNS turns into Gemini content format.
+    """Convert the last MAX_HISTORY_TURNS turns into Bedrock Converse message format.
 
-    Gemini uses "user" / "model" roles (not "assistant").
+    Bedrock Converse uses "user" / "assistant" roles and a "content" list.
     History must alternate; we pass what we have and let the SDK handle it.
     """
     recent = history[-MAX_HISTORY_TURNS:]
     result = []
     for turn in recent:
-        role = "model" if turn.role == "assistant" else "user"
-        result.append({"role": role, "parts": [{"text": turn.content}]})
+        role = "assistant" if turn.role == "assistant" else "user"
+        result.append({"role": role, "content": [{"text": turn.content}]})
     return result
 
 

@@ -1,25 +1,26 @@
-"""LLM generation with model tiering and streaming.
+"""LLM generation with model tiering and streaming via AWS Bedrock Converse.
 
 Pipeline:
   1. If context_chunks is empty → yield a canned decline message immediately
      (no API call wasted).
-  2. Otherwise → determine the model tier (Flash-Lite vs Flash via should_escalate),
-     build the prompt, call _call_gemini (async generator), yield tokens.
+  2. Otherwise → determine the model tier (Primary vs Escalation via should_escalate),
+     build the prompt, call _call_bedrock (async generator), yield tokens.
 
 Model tiering:
-  - GEMINI_LITE_MODEL (gemini-2.5-flash-lite): simple single-part questions.
-  - GEMINI_FLASH_MODEL (gemini-3-flash): complex, comparative, or multi-part queries.
+  - PRIMARY_MODEL (us.amazon.nova-lite-v1:0 by default): simple single-part questions.
+  - ESCALATION_MODEL (us.nvidia.nemotron-3-super-120b-v1:0 by default): complex,
+    comparative, or multi-part queries.
 
 Timeouts:
-  - GEMINI_TIMEOUT_SECONDS controls both the HTTP client timeout (passed to
-    genai.Client) and the per-stream iteration timeout via asyncio.timeout.
-    Default is 30 seconds. Set to 0 to disable (not recommended in Lambda).
+  - BEDROCK_TIMEOUT_SECONDS controls the botocore client's read_timeout (passed to
+    Config at client creation). Default is 30 seconds. Set to 0 to disable (not
+    recommended in Lambda).
 
 Public API:
-    generate_answer(question, context_chunks, history, api_key, stream) → AsyncGenerator[str]
+    generate_answer(question, context_chunks, history) → AsyncGenerator[str]
     should_escalate(question) → bool
     detect_language(text) → str  (ISO 639-1 code)
-    _call_gemini(...)  → AsyncGenerator[str]  (internal, injectable in tests)
+    _call_bedrock(...)  → AsyncGenerator[str]  (internal, injectable in tests)
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from langdetect import detect
 
@@ -39,19 +41,21 @@ __all__ = [
     "detect_language",
     "resolve_model",
     "NO_CONTEXT_REPLY",
+    "PRIMARY_MODEL",
+    "ESCALATION_MODEL",
 ]
 
 logger = logging.getLogger(__name__)
 
 # ── Model configuration ───────────────────────────────────────────────────────
 
-GEMINI_LITE_MODEL: str = os.getenv("GEMINI_LITE_MODEL", "gemini-2.5-flash-lite")
-GEMINI_FLASH_MODEL: str = os.getenv("GEMINI_FLASH_MODEL", "gemini-3-flash")
+PRIMARY_MODEL: str = os.getenv("PRIMARY_MODEL", "us.amazon.nova-lite-v1:0")
+ESCALATION_MODEL: str = os.getenv("ESCALATION_MODEL", "us.nvidia.nemotron-3-super-120b-v1:0")
 
-# Timeout for Gemini API calls (HTTP + stream iteration). 30s default.
-# In Lambda the function timeout is the ultimate backstop, but this prevents
-# a single stalled stream from blocking the concurrent execution slot.
-_GEMINI_TIMEOUT: float = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "30")) or 30.0
+# Read timeout for the Bedrock client. 0 coerces to 30 — Lambda function
+# timeout is the ultimate backstop, but this prevents a stalled stream from
+# blocking the execution slot indefinitely.
+_BEDROCK_TIMEOUT: float = float(os.getenv("BEDROCK_TIMEOUT_SECONDS", "30")) or 30.0
 
 NO_CONTEXT_REPLY = (
     "I don't have information about that in my current knowledge. "
@@ -69,8 +73,8 @@ def resolve_model(question: str, context_chunks: list[RetrievedChunk] | None = N
     pipeline, so the model name in RAGResult always matches what was called.
     """
     if not context_chunks:
-        return GEMINI_LITE_MODEL
-    return GEMINI_FLASH_MODEL if should_escalate(question) else GEMINI_LITE_MODEL
+        return PRIMARY_MODEL
+    return ESCALATION_MODEL if should_escalate(question) else PRIMARY_MODEL
 
 
 # ── Escalation heuristic ──────────────────────────────────────────────────────
@@ -147,38 +151,94 @@ def detect_language(text: str) -> str:
         return "en"
 
 
-# ── Internal Gemini caller ────────────────────────────────────────────────────
+# ── Bedrock client (lazy singleton) ──────────────────────────────────────────
+
+_BEDROCK_CLIENT: Any = None
 
 
-async def _call_gemini(
+def _get_bedrock_client() -> Any:
+    global _BEDROCK_CLIENT
+    if _BEDROCK_CLIENT is None:
+        import boto3
+        import botocore.config
+
+        _BEDROCK_CLIENT = boto3.client(
+            "bedrock-runtime",
+            region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+            config=botocore.config.Config(
+                read_timeout=int(_BEDROCK_TIMEOUT) + 5,
+                connect_timeout=5,
+                retries={"max_attempts": 2},
+            ),
+        )
+    return _BEDROCK_CLIENT
+
+
+# ── Internal Bedrock caller ───────────────────────────────────────────────────
+
+
+async def _call_bedrock(
     question: str,
     context_str: str,
     history: list[Turn],
     model_name: str,
-    api_key: str,
 ) -> AsyncGenerator[str, None]:
-    """Stream tokens from Gemini for the given question + context."""
-    from google import genai
-    from google.genai import types as genai_types
+    """Stream tokens from AWS Bedrock Converse for the given question + context.
 
-    client = genai.Client(api_key=api_key, http_options={"timeout": _GEMINI_TIMEOUT * 1000})
-
-    history_contents = format_history(history)
-    user_msg = build_user_message(question, context_str)
-    contents = [*history_contents, {"role": "user", "parts": [{"text": user_msg}]}]
-
-    response = client.models.generate_content_stream(
-        model=model_name,
-        contents=contents,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.1,
-            max_output_tokens=800,
-        ),
+    Reasoning tokens (<think>…</think>) are stripped inline — Bedrock routes most
+    reasoning to reasoningContent delta blocks (filtered by the "text" key check),
+    but the stateful stripper handles any that leak into the text stream
+    (relevant for the Nemotron escalation path).
+    """
+    client = _get_bedrock_client()
+    messages = [
+        *format_history(history),
+        {"role": "user", "content": [{"text": build_user_message(question, context_str)}]},
+    ]
+    response = client.converse_stream(
+        modelId=model_name,
+        messages=messages,
+        system=[{"text": SYSTEM_PROMPT}],
+        inferenceConfig={"maxTokens": 800, "temperature": 0.1},
     )
-    for chunk in response:
-        if chunk.text:
-            yield chunk.text
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+    buf = ""
+    in_think = False
+    for event in response["stream"]:
+        if "contentBlockDelta" not in event:
+            continue
+        delta = event["contentBlockDelta"]["delta"]
+        if "text" not in delta:
+            continue  # skip reasoningContent and other non-text delta types
+        buf += delta["text"]
+        while True:
+            if in_think:
+                end = buf.find(_CLOSE)
+                if end >= 0:
+                    buf = buf[end + len(_CLOSE) :]
+                    in_think = False
+                else:
+                    # Keep only a tail long enough to hold a partial </think> tag.
+                    if len(buf) > len(_CLOSE) - 1:
+                        buf = buf[-(len(_CLOSE) - 1) :]
+                    break
+            else:
+                start = buf.find(_OPEN)
+                if start >= 0:
+                    if start > 0:
+                        yield buf[:start]
+                    buf = buf[start + len(_OPEN) :]
+                    in_think = True
+                else:
+                    # Keep a tail long enough to hold a partial <think> tag.
+                    if len(buf) > len(_OPEN) - 1:
+                        yield buf[: -(len(_OPEN) - 1)]
+                        buf = buf[-(len(_OPEN) - 1) :]
+                    break
+    if buf and not in_think:
+        yield buf
 
 
 # ── Public entry-point ────────────────────────────────────────────────────────
@@ -188,7 +248,6 @@ async def generate_answer(
     question: str,
     context_chunks: list[RetrievedChunk],
     history: list[Turn],
-    api_key: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Yield answer tokens for *question* given *context_chunks* and *history*.
 
@@ -200,8 +259,7 @@ async def generate_answer(
         return
 
     model_name = resolve_model(question, context_chunks)
-    key = api_key or os.environ.get("GEMINI_API_KEY", "")
     context_str = format_context(context_chunks)
 
-    async for token in _call_gemini(question, context_str, history, model_name, key):
+    async for token in _call_bedrock(question, context_str, history, model_name):
         yield token

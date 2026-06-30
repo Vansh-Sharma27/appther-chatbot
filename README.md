@@ -2,7 +2,7 @@
 
 24/7 AI support chatbot for appther.com — serverless-first RAG pipeline on AWS.
 
-**Architecture:** weekly crawler → Voyage embeddings → LanceDB-on-S3 → Lambda (hybrid retrieve + rerank) → Gemini Flash-Lite → streaming React widget.  
+**Architecture:** weekly crawler → Voyage embeddings → LanceDB-on-S3 → Lambda (hybrid retrieve + rerank) → Amazon Bedrock (Nova 2 Lite) → streaming React widget.  
 **Cost:** ~$16–20/month post-free-tier, $0 idle.
 
 ## Repo layout
@@ -43,8 +43,9 @@ aws secretsmanager put-secret-value \
 | Secret path | Provider | Used for |
 |---|---|---|
 | `appther-chatbot/voyage-api-key` | [Voyage AI](https://www.voyageai.com) | Embeddings (`voyage-3.5`) + reranking (`rerank-2.5`) |
-| `appther-chatbot/gemini-api-key` | [Google AI Studio](https://aistudio.google.com) | LLM inference (Flash-Lite + 3 Flash) |
 | `appther-chatbot/jina-api-key` | [Jina AI](https://jina.ai) | Fallback/standby embeddings (`jina-embeddings-v3`) |
+
+> **LLM inference (Bedrock):** no API key needed — the Lambda IAM role is granted `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` directly. Enable model access for **Amazon Nova 2 Lite** and **NVIDIA Nemotron 3 Super 120B** in the Bedrock console (us-east-1) before deploying.
 
 ## Terraform (scaffold / local validation)
 
@@ -68,7 +69,7 @@ pytest -q   # 462+ tests across crawler (Steps 1–4) and api (Steps 5–6)
 ### Running the API locally
 
 ```bash
-# Requires VOYAGE_API_KEY, GEMINI_API_KEY, and a built LanceDB index
+# Requires VOYAGE_API_KEY and a built LanceDB index
 export LANCE_INDEX_URI=./lance_index
 export DYNAMODB_TABLE=appther-chatbot-main
 # API key auth is disabled when API_AUTH_KEY is empty (dev mode).

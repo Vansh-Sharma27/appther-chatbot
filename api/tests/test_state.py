@@ -48,7 +48,7 @@ class TestAnswerCache:
             "answer": "Appther offers ERP implementation services.",
             "sources": ["https://www.appther.com/services/erp"],
             "language": "en",
-            "model": "gemini-2.5-flash-lite",
+            "model": "us.amazon.nova-lite-v1:0",
             "rewritten_query": "What is ERP?",
             "chunks_used": 4,
         }
